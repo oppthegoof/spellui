@@ -298,9 +298,6 @@ end
 local CastingIndicator = {}
 CastingIndicator.__index = CastingIndicator
 
-self._pos   = nil
-self._angle = 0
-
 function CastingIndicator.new(screenGui)
     local self = setmetatable({}, CastingIndicator)
 
@@ -313,6 +310,8 @@ function CastingIndicator.new(screenGui)
     self._chargeDur   = HOLD_TIME
     self._spellName   = ""
     self._visible     = false
+    self._pos   = nil
+    self._angle = 0
 
     -- Root frame
     self._root = makeFrame({
