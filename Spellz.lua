@@ -390,17 +390,9 @@ function OrbitIndicator:_makeBadge(char, holdDur)
         BackgroundColor3 = THEME.gold_dim,
         Size             = UDim2.new(1, 0, 0, 0),   -- height grows upward
         Position         = UDim2.new(0, 0, 1, 0),   -- anchored to bottom
-        ZIndex           = 32,
+        ZIndex           = 31,
     }, frame)
-    -- Clip fill inside the badge shape
-    local fillClip = makeFrame({
-        BackgroundTransparency = 1,
-        Size                   = UDim2.new(1, 0, 1, 0),
-        ClipsDescendants       = true,
-        ZIndex                 = 31,
-    }, frame)
-    fill.Parent = fillClip
-    addCorner(9, fillClip)
+    addCorner(10, fill)
 
     -- Key label
     local label = makeLabel({
