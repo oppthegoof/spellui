@@ -132,20 +132,29 @@ local function generateSequence(code, seed)
         length = 5
     end
 
-    local available = {}
-    for i = 1, #CAST_KEYS do
-        table.insert(available, CAST_KEYS:sub(i, i))
-    end
-
     local seq = {}
-    local rng = h
+    local used = {}
+
     for i = 1, length do
-        if #available == 0 then break end
-        -- LCG pseudo-random seeded from hash
-        rng = (rng * 1664525 + 1013904223) % (2^31)
-        local idx = (rng % #available) + 1
-        table.insert(seq, available[idx])
-        table.remove(available, idx)
+        -- derive a new number per index (no chaining)
+        local n = (h + i * 2654435761) % (2^31)
+
+        local idx = (n % #CAST_KEYS) + 1
+        local char = CAST_KEYS:sub(idx, idx)
+
+        -- prevent duplicates (retry deterministically)
+        local attempts = 0
+        while used[char] do
+            n = (n + 1) % (2^31)
+            idx = (n % #CAST_KEYS) + 1
+            char = CAST_KEYS:sub(idx, idx)
+
+            attempts += 1
+            if attempts > #CAST_KEYS then break end
+        end
+
+        used[char] = true
+        table.insert(seq, char)
     end
 
     return table.concat(seq)
