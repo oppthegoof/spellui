@@ -19,11 +19,10 @@
 ║    Escape = cancel current sequence                          ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  IN-BOOK CONTROLS:                                           ║
-║    ← / → Arrow keys  : Turn pages                           ║
+║    ← / → Arrow keys   : Turn pages                           ║
 ║    Ctrl+S             : Save spell name edits                ║
 ║    Ctrl+N             : New spell slot                       ║
 ║    Ctrl+B             : Switch books                         ║
-║    Ctrl+Delete        : Remove current spell                 ║
 ╚══════════════════════════════════════════════════════════════╝
 ]]
 
@@ -1283,30 +1282,16 @@ function SpellbookUI:_buildBottomBar(win)
     }, bar)
     addCorner(4, downBtn)
     downBtn.MouseButton1Click:Connect(function() self:_reorder(1) end)
-
-    -- Remove spell
-    local removeBtn = makeButton({
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.red,
-        Font             = Enum.Font.Code,
-        TextSize         = 11,
-        Size             = UDim2.new(0, 110, 0, 26),
-        Position         = UDim2.new(1, -118, 0, 2),
-        Text             = "✕  Remove Spell",
-        ZIndex           = 12,
-    }, bar)
-    addCorner(4, removeBtn)
-    removeBtn.MouseButton1Click:Connect(function() self:_deleteSpell() end)
 end
 
 -- ── Rendering ─────────────────────────────────────────────────
 
-function SpellbookUI:_currentBook()
+function SpellbookUI:_currentBookF()
     return self._lib._books[self._currentBook]
 end
 
 function SpellbookUI:_renderPage()
-    local book = self:_currentBook()
+    local book = self:_currentBookF()
     if not book then return end
 
     local spells = book.spells
@@ -1360,7 +1345,7 @@ end
 -- ── Navigation ─────────────────────────────────────────────────
 
 function SpellbookUI:_prevPage()
-    local book = self:_currentBook()
+    local book = self:_currentBookF()
     if not book then return end
     if self._currentPage > 1 then
         self._currentPage = self._currentPage - 1
@@ -1369,7 +1354,7 @@ function SpellbookUI:_prevPage()
 end
 
 function SpellbookUI:_nextPage()
-    local book = self:_currentBook()
+    local book = self:_currentBookF()
     if not book then return end
     if self._currentPage < #book.spells then
         self._currentPage = self._currentPage + 1
@@ -1378,7 +1363,7 @@ function SpellbookUI:_nextPage()
 end
 
 function SpellbookUI:_reorder(direction)
-    local book = self:_currentBook()
+    local book = self:_currentBookF()
     if not book then return end
     local newIdx = book:moveSpell(self._currentPage, direction)
     self._currentPage = newIdx
@@ -1388,7 +1373,7 @@ end
 -- ── Spell actions ──────────────────────────────────────────────
 
 function SpellbookUI:_castCurrent()
-    local book = self:_currentBook()
+    local book = self:_currentBookF()
     if not book or #book.spells == 0 then return end
     local spell = book.spells[self._currentPage]
     if not spell then return end
@@ -1404,22 +1389,6 @@ function SpellbookUI:_castCurrent()
     end)
 
     self._engine:_cast(spell)
-end
-
-function SpellbookUI:_deleteSpell()
-    local book = self:_currentBook()
-    if not book or #book.spells == 0 then return end
-    local spell = book.spells[self._currentPage]
-    book:removeSpell(self._currentPage)
-    self._currentPage = math.max(1, self._currentPage - 1)
-    self._statusLabel.Text       = "✦ Spell removed."
-    self._statusLabel.TextColor3 = THEME.red
-    task.delay(2, function()
-        if self._statusLabel then
-            self._statusLabel.Text = ""
-        end
-    end)
-    self:_renderPage()
 end
 
 -- ── Book switcher ──────────────────────────────────────────────
