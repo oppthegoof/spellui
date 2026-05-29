@@ -127,7 +127,7 @@ local function hashString(s)
     return h
 end
 
-local function generateSequence(seed, usedSequences, maxAttempts)
+local function generateSequence(name, seed, usedSequences, maxAttempts)
     usedSequences = usedSequences or {}
     maxAttempts   = maxAttempts or 200
 
