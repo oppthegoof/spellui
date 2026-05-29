@@ -145,7 +145,7 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
 
     local attempt = 0
     while attempt < maxAttempts do
-        attempt += 1
+        attempt = attempt + 1
         local combined = name .. seed .. tostring(attempt)
         local h = hashString(combined)
 
@@ -163,7 +163,7 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
                 n    = (n + 7) % (2^31)
                 idx  = (n % #CAST_KEYS) + 1
                 char = CAST_KEYS:sub(idx, idx)
-                inner += 1
+                inner = inner + 1
                 if inner > #CAST_KEYS then ok = false; break end
             end
             if not ok then break end
@@ -1111,7 +1111,7 @@ function SpellbookUI:_tickCooldownBar()
         self._cdLabel.Text = string.format("%.1fs / %.0fs", rem, spell.cooldown)
     else
         self._cdBar.BackgroundColor3 = THEME.green
-        self._cdLabel.Text = "Ready  (%.0fs)":format(spell.cooldown)
+        self._cdLabel.Text = string.format("Ready  (%.0fs)", spell.cooldown)
     end
 end
 
@@ -1214,14 +1214,14 @@ end
 function SpellbookUI:_prevPage()
     local book = self:_currentBookF()
     if not book or self._currentPage <= 1 then return end
-    self._currentPage -= 1
+    self._currentPage = self._currentPage - 1
     self:_renderPage()
 end
 
 function SpellbookUI:_nextPage()
     local book = self:_currentBookF()
     if not book or self._currentPage >= #book.spells then return end
-    self._currentPage += 1
+    self._currentPage = self._currentPage + 1
     self:_renderPage()
 end
 
