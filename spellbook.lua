@@ -127,28 +127,37 @@ local function hashString(s)
     return h
 end
 
-local function generateSequence(name, seed, usedSequences, maxAttempts)
+local function generateSequence(seed, usedSequences, maxAttempts)
     usedSequences = usedSequences or {}
-    maxAttempts   = maxAttempts   or 200
+    maxAttempts   = maxAttempts or 200
 
-    local nameLen = #(name:match("^%s*(.-)%s*$") or "")
+    -- base hash (ONLY seed matters)
+    local baseHash = hashString(seed)
+
+    -- weighted rarity roll (longer = rarer)
+    local roll = baseHash % 1000 -- 0–999
+
     local length
-    if nameLen < 40 then
+    if roll < 500 then        -- 50%
         length = 2
-    elseif nameLen < 100 then
+    elseif roll < 800 then    -- 30%
         length = 3
-    elseif nameLen < 200 then
+    elseif roll < 930 then    -- 13%
         length = 4
-    else
+    elseif roll < 990 then    -- 6%
         length = 5
+    else                      -- 1%
+        length = 6
     end
+
     length = math.min(length, #CAST_KEYS)
 
     local attempt = 0
     while attempt < maxAttempts do
         attempt = attempt + 1
-        local combined = name .. seed .. tostring(attempt)
-        local h = hashString(combined)
+
+        -- deterministic per attempt
+        local h = hashString(seed .. tostring(attempt))
 
         local seq  = {}
         local used = {}
@@ -165,7 +174,7 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
                 idx  = (n % #CAST_KEYS) + 1
                 char = CAST_KEYS:sub(idx, idx)
                 inner = inner + 1
-                if inner > #CAST_KEYS then ok = false; break end
+                if inner > #CAST_KEYS then ok = false break end
             end
             if not ok then break end
 
@@ -181,6 +190,7 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
             end
         end
     end
+
     return "1"
 end
 
