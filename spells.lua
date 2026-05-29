@@ -298,6 +298,9 @@ end
 local CastingIndicator = {}
 CastingIndicator.__index = CastingIndicator
 
+self._pos   = nil
+self._angle = 0
+
 function CastingIndicator.new(screenGui)
     local self = setmetatable({}, CastingIndicator)
 
@@ -384,13 +387,55 @@ end
 
 function CastingIndicator:_tick()
     if not self._visible then return end
+
+    local dt = RunService.Heartbeat:Wait()
+
+    -- ─── Charge Logic (unchanged) ───
     if self._charging then
         local elapsed = tick() - self._chargeStart
         self._charge = math.clamp(elapsed / self._chargeDur, 0, 1)
+
         local fillCol = lerpColor(THEME.gold_dim, THEME.ind_charge, self._charge)
         self._barFill.BackgroundColor3 = fillCol
         self._barFill.Size = UDim2.new(self._charge, 0, 1, 0)
     end
+
+    -- ─── Mouse Follow ───
+    local mouse = UserInputService:GetMouseLocation()
+    local cam   = workspace.CurrentCamera
+    local view  = cam.ViewportSize
+
+    -- 🔧 SETTINGS (tweak these)
+    local radius   = 40      -- distance from cursor
+    local smooth   = 0.2     -- 0 = instant, 1 = slow
+    local orbit    = true    -- true = circle around mouse
+
+    -- Orbiting motion
+    local offset
+    if orbit then
+        self._angle += dt * 4
+        offset = Vector2.new(
+            math.cos(self._angle) * radius,
+            math.sin(self._angle) * radius
+        )
+    else
+        offset = Vector2.new(20, 20)
+    end
+
+    local target = mouse + offset
+
+    -- Smooth follow
+    if not self._pos then
+        self._pos = target
+    end
+    self._pos = self._pos:Lerp(target, smooth)
+
+    -- Clamp to screen
+    local size = self._root.AbsoluteSize
+    local x = math.clamp(self._pos.X, 0, view.X - size.X)
+    local y = math.clamp(self._pos.Y, 0, view.Y - size.Y)
+
+    self._root.Position = UDim2.new(0, x, 0, y)
 end
 
 function CastingIndicator:_rebuildKeys()
@@ -446,7 +491,6 @@ function CastingIndicator:_rebuildKeys()
     local totalW = n * 32 + (n - 1) * 6 + 24
     local totalH = 90
     self._root.Size     = UDim2.new(0, math.max(totalW, 80), 0, totalH)
-    self._root.Position = UDim2.new(0.5, -math.max(totalW, 80) / 2, 0, 32)
 
     -- Reposition bar and label relative to fixed offsets
     self._barBg.Position    = UDim2.new(0, 12, 0, 52)
