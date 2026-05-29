@@ -666,7 +666,7 @@ function CastingEngine.new(screenGui, indicator)
     self._holdThread     = nil     -- final cast hold thread
     self._idleThread     = nil     -- idle reset thread
     self._connections    = {}
-    self._castModeKey    = Enum.KeyCode.BackQuote
+    self._castModeKey    = Enum.KeyCode.uote
     self._modeLabel      = nil
     self._awaitingNext   = false   -- true when waiting for current key to charge
     self._currentSpell   = nil     -- spell being tracked (nil = open input)
@@ -1556,7 +1556,7 @@ SpellbookLib.__index = SpellbookLib
 
     config:
         toggleKey     Enum.KeyCode   window toggle          (default: RightBracket)
-        castModeKey   Enum.KeyCode   enter/exit cast mode   (default: BackQuote `)
+        castModeKey   Enum.KeyCode   enter/exit cast mode   (default: Tilde `)
         autoOpen      bool           open immediately       (default: false)
 ]]
 function SpellbookLib.new(config)
@@ -1568,7 +1568,7 @@ function SpellbookLib.new(config)
     self._usedSequences = {}
 
     local toggleKey   = config.toggleKey   or Enum.KeyCode.RightBracket
-    local castModeKey = config.castModeKey or Enum.KeyCode.BackQuote
+    local castModeKey = config.castModeKey or Enum.KeyCode.Tilde
     local autoOpen    = config.autoOpen    or false
 
     task.defer(function()
