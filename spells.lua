@@ -43,7 +43,7 @@ local PlayerGui         = LocalPlayer:WaitForChild("PlayerGui")
 --  CONSTANTS & THEME
 -- ─────────────────────────────────────────────────────────────
 
-local CAST_KEYS = "QERTFGZXCVB"
+local CAST_KEYS = "QERTYUIOPFGHJKLZXCVBNM"
 
 local THEME = {
     bg           = Color3.fromHex("0d0d14"),
