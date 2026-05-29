@@ -998,7 +998,7 @@ local function buildSeqRow(parent, sequence)
         }, parent)
         addCorner(4, badge)
         addStroke(THEME.gold_dim, 1, badge)
-        makeLabel({
+        local inputLabel = makeLabel({
             Size       = UDim2.new(1, 0, 1, 0),
             Text       = ch,
             TextColor3 = THEME.gold,
@@ -1006,6 +1006,7 @@ local function buildSeqRow(parent, sequence)
             TextSize   = 14,
             ZIndex     = 13,
         }, badge)
+        addCorner(4, inputLabel)
     end
 end
 
