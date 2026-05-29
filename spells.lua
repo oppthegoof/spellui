@@ -78,10 +78,10 @@ local SPELL_ERRORS = {
 }
 
 local CAST_MESSAGES = {
-    "✦ Spell cast…",
-    "✦ Weaving complete…",
-    "✦ Incantation released…",
-    "✦ The magic flows…",
+    "Spell cast…",
+    "Weaving complete…",
+    "Incantation released…",
+    "The magic flows…",
 }
 
 local HOLD_TIME   = 1.0   -- seconds to hold final key
@@ -165,7 +165,7 @@ function Spell.new(name, callback, seed)
     self.seed      = seed or tostring(math.random(100000, 999999))
     self.pageIndex = 0
     self._sequence = nil
-    -- "description" used as pseudo-code for sequence length
+    -- "description"used as pseudo-code for sequence length
     self._desc     = name .. self.seed
     return self
 end
@@ -402,7 +402,7 @@ function CastingIndicator:_rebuildKeys()
         local done = (i <= pressedCount)
 
         local badge = makeFrame({
-            Name             = "Key_" .. i,
+            Name             = "Key_".. i,
             BackgroundColor3 = done and THEME.ind_key_done or THEME.ind_key_bg,
             Size             = UDim2.new(0, 32, 0, 36),
             ZIndex           = 22,
@@ -477,7 +477,7 @@ function CastingIndicator:startCharge(duration)
     self._chargeStart = tick()
     self._chargeDur   = duration or HOLD_TIME
     self._charge      = 0
-    self._nameLabel.Text       = "✦ " .. self._spellName
+    self._nameLabel.Text       = "".. self._spellName
     self._nameLabel.TextColor3 = THEME.ind_charge
 end
 
@@ -672,7 +672,7 @@ function CastingEngine:_cast(spell)
     local success, err = pcall(spell.callback)
 
     local lines = {
-        { text = msg .. " [" .. spell.name .. "]", color = THEME.gold }
+        { text = msg .. "[".. spell.name .. "]", color = THEME.gold }
     }
     if success then
         table.insert(lines, { text = "The magic takes hold.", color = THEME.ink })
@@ -888,7 +888,7 @@ function SpellbookUI:_buildTitlebar(win)
     self._titleLabel = makeLabel({
         Size           = UDim2.new(1, -120, 1, 0),
         Position       = UDim2.new(0, 16, 0, 0),
-        Text           = "✦  Grimoire  ✦",
+        Text           = " Grimoire  ",
         TextColor3     = THEME.gold,
         Font           = Enum.Font.GothamBold,
         TextSize       = 14,
@@ -1083,7 +1083,7 @@ function SpellbookUI:_buildPageContent(container)
     makeLabel({
         Size           = UDim2.new(0, 28, 1, 0),
         Position       = UDim2.new(0.5, -14, 0, 0),
-        Text           = "✦",
+        Text           = "",
         TextColor3     = THEME.gold,
         Font           = Enum.Font.SpecialElite,
         TextSize       = 11,
@@ -1156,7 +1156,7 @@ function SpellbookUI:_buildPageContent(container)
         Size             = UDim2.new(0, 140, 0, 36),
         Position         = UDim2.new(0, pad, 0, 388),
         BackgroundColor3 = THEME.gold_dim,
-        Text             = "✦  Cast Now",
+        Text             = " Cast Now",
         TextColor3       = THEME.bg,
         Font             = Enum.Font.GothamBold,
         TextSize         = 13,
@@ -1308,10 +1308,10 @@ function SpellbookUI:_renderPage()
         self._currentPage = idx
     end
 
-    self._pageNumLabel.Text = "Page " .. idx .. " of " .. total
+    self._pageNumLabel.Text = "Page ".. idx .. "of ".. total
     self._prevBtn.TextColor3 = (idx > 1)        and THEME.gold or THEME.ink_dim
     self._nextBtn.TextColor3 = (idx < #spells)  and THEME.gold or THEME.ink_dim
-    self._titleLabel.Text    = "✦  " .. book.name .. "  ✦"
+    self._titleLabel.Text    = " ".. book.name .. " "
     self._bookLabel.Text     = book.name
 
     if #spells == 0 then
@@ -1323,9 +1323,9 @@ function SpellbookUI:_renderPage()
 
     local spell = spells[idx]
     self._nameBox.Text   = spell.name
-    self._codeLabel.Text = "-- Callback bound to: " .. spell.name
-                        .. "\n-- Sequence: " .. spell:getSequence()
-                        .. "\n-- Seed: " .. spell.seed
+    self._codeLabel.Text = "-- Callback bound to: ".. spell.name
+                        .. "\n-- Sequence: ".. spell:getSequence()
+                        .. "\n-- Seed: ".. spell.seed
                         .. "\n\n-- Hold the final key in the\n-- sequence for 1s to cast."
     self._statusLabel.Text = ""
     self:_rebuildSeqDisplay(spell:getSequence())
@@ -1399,7 +1399,7 @@ function SpellbookUI:_openBookSwitcher()
         self._statusLabel.Text       = "No other books."
         self._statusLabel.TextColor3 = THEME.ink_dim
         task.delay(2, function()
-            if self._statusLabel then self._statusLabel.Text = "" end
+            if self._statusLabel then self._statusLabel.Text = ""end
         end)
         return
     end
@@ -1408,10 +1408,10 @@ function SpellbookUI:_openBookSwitcher()
     self._currentBook = (self._currentBook % #books) + 1
     self._currentPage = 1
     self:_renderPage()
-    self._statusLabel.Text       = "✦ Switched to: " .. books[self._currentBook].name
+    self._statusLabel.Text       = "Switched to: ".. books[self._currentBook].name
     self._statusLabel.TextColor3 = THEME.green
     task.delay(2, function()
-        if self._statusLabel then self._statusLabel.Text = "" end
+        if self._statusLabel then self._statusLabel.Text = ""end
     end)
 end
 
