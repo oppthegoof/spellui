@@ -171,7 +171,7 @@ function Spell.new(name, callback, seed)
     local self = setmetatable({}, Spell)
     self.name      = name or "Unnamed Spell"
     self.callback  = callback or function() end
-    self.seed      = seed or tostring(math.random(100000, 999999))
+    self.seed      = seed or tostring(name)
     self.pageIndex = 0
     self._sequence = nil
     -- "description"used as pseudo-code for sequence length
