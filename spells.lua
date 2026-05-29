@@ -10,19 +10,20 @@
 ║    book:addSpell("Luminary", function()                      ║
 ║        print("Let there be light!")                          ║
 ║    end)                                                      ║
+║    book:addSpell("Blaze", function() end, { cooldown = 5 })  ║
 ║    lib:open()                                                ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  CASTING:                                                    ║
-║    Press keys in sequence shown on each spell page           ║
+║    Press castModeKey (default: `) to enter casting mode      ║
+║    Press number keys 1-9, 0 in sequence                      ║
 ║    Hold the FINAL key for 1 second to cast                   ║
 ║    Release any key before hold completes = cancel            ║
-║    Escape = cancel current sequence                          ║
+║    Escape / castModeKey again = exit casting mode            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  IN-BOOK CONTROLS:                                           ║
 ║    ← / → Arrow keys   : Turn pages                           ║
-║    Ctrl+S             : Save spell name edits                ║
-║    Ctrl+N             : New spell slot                       ║
-║    Ctrl+B             : Switch books                         ║
+║    ↑ / ↓ buttons      : Reorder spell in book                ║
+║    [books] button     : Cycle to next book                   ║
 ╚══════════════════════════════════════════════════════════════╝
 ]]
 
@@ -34,7 +35,6 @@ local Players           = game:GetService("Players")
 local UserInputService  = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
 local RunService        = game:GetService("RunService")
-local CoreGui           = game:GetService("CoreGui")
 
 local LocalPlayer       = Players.LocalPlayer
 local PlayerGui         = LocalPlayer:WaitForChild("PlayerGui")
@@ -43,7 +43,18 @@ local PlayerGui         = LocalPlayer:WaitForChild("PlayerGui")
 --  CONSTANTS & THEME
 -- ─────────────────────────────────────────────────────────────
 
-local CAST_KEYS = "QERTYUPFGHJKLZXCVBNM"
+-- Number keys only — zero keybind conflicts with tools/actions
+local CAST_KEYS    = "1234567890"
+local CAST_KEY_CODES = {
+    Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three,
+    Enum.KeyCode.Four, Enum.KeyCode.Five, Enum.KeyCode.Six,
+    Enum.KeyCode.Seven, Enum.KeyCode.Eight, Enum.KeyCode.Nine,
+    Enum.KeyCode.Zero,
+}
+local CAST_KEY_MAP = {}
+for i, kc in ipairs(CAST_KEY_CODES) do
+    CAST_KEY_MAP[kc] = CAST_KEYS:sub(i, i)
+end
 
 local THEME = {
     bg           = Color3.fromHex("0d0d14"),
@@ -55,14 +66,12 @@ local THEME = {
     gold_dim     = Color3.fromHex("7a6530"),
     red          = Color3.fromHex("c84b4b"),
     green        = Color3.fromHex("4bc87a"),
+    orange       = Color3.fromHex("e8944a"),
     spine        = Color3.fromHex("1a1a2e"),
-    shadow       = Color3.fromHex("000000"),
     ind_bg       = Color3.fromHex("0a0a14"),
     ind_border   = Color3.fromHex("2a2a50"),
     ind_key_bg   = Color3.fromHex("14142a"),
-    ind_key_done = Color3.fromHex("1e1e3a"),
     ind_charge   = Color3.fromHex("e8c86a"),
-    console_text = Color3.fromHex("9090d0"),
 }
 
 local SPELL_ERRORS = {
@@ -78,16 +87,16 @@ local SPELL_ERRORS = {
 }
 
 local CAST_MESSAGES = {
-    "Spell cast…",
-    "Weaving complete…",
-    "Incantation released…",
-    "The magic flows…",
+    "Weaving complete",
+    "Incantation released",
+    "The magic flows",
+    "Spell cast",
 }
 
-local HOLD_TIME   = 1.0   -- seconds to hold final key
-local TIMEOUT     = 4.0   -- seconds before sequence resets
-local WIN_W       = 480
-local WIN_H       = 640
+local HOLD_TIME   = 1.0
+local TIMEOUT     = 5.0
+local WIN_W       = 400
+local WIN_H       = 480
 
 -- ─────────────────────────────────────────────────────────────
 --  UTILITY
@@ -106,8 +115,6 @@ local function lerpColor(c1, c2, t)
     )
 end
 
--- SHA256-like deterministic hash → sequence generator
--- Uses a simple but consistent approach for Roblox
 local function hashString(s)
     local h = 5381
     for i = 1, #s do
@@ -116,48 +123,67 @@ local function hashString(s)
     return h
 end
 
-local function generateSequence(code, seed)
-    local combined = code .. seed
-    local h = hashString(combined)
+-- Generate a sequence using only CAST_KEYS digits, no duplicates within seq
+-- Also accepts a `usedSequences` set to guarantee global uniqueness
+local function generateSequence(name, seed, usedSequences, maxAttempts)
+    usedSequences  = usedSequences or {}
+    maxAttempts    = maxAttempts or 200
 
-    local charCount = #(code:match("^%s*(.-)%s*$") or "")
+    local nameLen = #(name:match("^%s*(.-)%s*$") or "")
     local length
-    if charCount < 60 then
+    if nameLen < 40 then
         length = 2
-    elseif charCount < 150 then
+    elseif nameLen < 100 then
         length = 3
-    elseif charCount < 400 then
+    elseif nameLen < 200 then
         length = 4
     else
         length = 5
     end
+    -- cap to available digits
+    length = math.min(length, #CAST_KEYS)
 
-    local seq = {}
-    local used = {}
+    local attempt = 0
+    while attempt < maxAttempts do
+        attempt += 1
+        local combined = name .. seed .. tostring(attempt)
+        local h = hashString(combined)
 
-    for i = 1, length do
-        -- derive a new number per index (no chaining)
-        local n = (h + i * 2654435761) % (2^31)
+        local seq  = {}
+        local used = {}
+        local ok   = true
 
-        local idx = (n % #CAST_KEYS) + 1
-        local char = CAST_KEYS:sub(idx, idx)
+        for i = 1, length do
+            local n    = (h + i * 2654435761 + attempt * 999983) % (2^31)
+            local idx  = (n % #CAST_KEYS) + 1
+            local char = CAST_KEYS:sub(idx, idx)
 
-        -- prevent duplicates (retry deterministically)
-        local attempts = 0
-        while used[char] do
-            n = (n + 1) % (2^31)
-            idx = (n % #CAST_KEYS) + 1
-            char = CAST_KEYS:sub(idx, idx)
+            local inner = 0
+            while used[char] do
+                n    = (n + 7) % (2^31)
+                idx  = (n % #CAST_KEYS) + 1
+                char = CAST_KEYS:sub(idx, idx)
+                inner += 1
+                if inner > #CAST_KEYS then ok = false; break end
+            end
+            if not ok then break end
 
-            attempts += 1
-            if attempts > #CAST_KEYS then break end
+            used[char] = true
+            table.insert(seq, char)
         end
 
-        used[char] = true
-        table.insert(seq, char)
+        if ok then
+            local result = table.concat(seq)
+            if not usedSequences[result] then
+                usedSequences[result] = true
+                return result
+            end
+        end
     end
 
-    return table.concat(seq)
+    -- Fallback: just pick any unused sequence
+    -- (extremely unlikely to reach here in practice)
+    return "1"
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -167,28 +193,37 @@ end
 local Spell = {}
 Spell.__index = Spell
 
-function Spell.new(name, callback, seed)
-    local self = setmetatable({}, Spell)
+function Spell.new(name, callback, opts)
+    opts = opts or {}
+    local self    = setmetatable({}, Spell)
     self.name      = name or "Unnamed Spell"
     self.callback  = callback or function() end
-    self.seed      = seed or tostring(name)
-    self.pageIndex = 0
+    self.cooldown  = opts.cooldown or 0   -- seconds; 0 = no cooldown
+    self._lastCast = 0
     self._sequence = nil
-    -- "description"used as pseudo-code for sequence length
-    self._desc     = name .. self.seed
     return self
 end
 
 function Spell:getSequence()
-    if not self._sequence then
-        self._sequence = generateSequence(self._desc, self.seed)
-    end
-    return self._sequence
+    return self._sequence or "?"
 end
 
-function Spell:invalidate()
-    self._sequence = nil
-    self._desc = self.name .. self.seed
+function Spell:setCooldown(seconds)
+    self.cooldown = seconds or 0
+end
+
+function Spell:isCoolingDown()
+    if self.cooldown <= 0 then return false end
+    return (tick() - self._lastCast) < self.cooldown
+end
+
+function Spell:cooldownRemaining()
+    if self.cooldown <= 0 then return 0 end
+    return math.max(0, self.cooldown - (tick() - self._lastCast))
+end
+
+function Spell:onCast()
+    self._lastCast = tick()
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -199,23 +234,20 @@ local Book = {}
 Book.__index = Book
 
 function Book.new(name)
-    local self = setmetatable({}, Book)
-    self.name   = name or "Grimoire"
-    self.spells = {}
+    local self   = setmetatable({}, Book)
+    self.name    = name or "Grimoire"
+    self.spells  = {}
     return self
 end
 
-function Book:addSpell(name, callback)
-    local spell = Spell.new(name, callback)
-    spell.pageIndex = #self.spells
+function Book:addSpell(name, callback, opts)
+    local spell = Spell.new(name, callback, opts)
     table.insert(self.spells, spell)
     return spell
 end
 
 function Book:removeSpell(index)
-    if self.spells[index] then
-        table.remove(self.spells, index)
-    end
+    if self.spells[index] then table.remove(self.spells, index) end
 end
 
 function Book:moveSpell(index, direction)
@@ -229,14 +261,12 @@ function Book:moveSpell(index, direction)
 end
 
 -- ─────────────────────────────────────────────────────────────
---  GUI BUILDER HELPERS
+--  GUI HELPERS
 -- ─────────────────────────────────────────────────────────────
 
 local function make(class, props, parent)
     local inst = Instance.new(class)
-    for k, v in pairs(props) do
-        inst[k] = v
-    end
+    for k, v in pairs(props) do inst[k] = v end
     if parent then inst.Parent = parent end
     return inst
 end
@@ -270,7 +300,6 @@ local function addCorner(radius, parent)
     local c = Instance.new("UICorner")
     c.CornerRadius = UDim.new(0, radius or 6)
     c.Parent = parent
-    return c
 end
 
 local function addStroke(color, thickness, parent)
@@ -278,298 +307,156 @@ local function addStroke(color, thickness, parent)
     s.Color     = color or THEME.page_border
     s.Thickness = thickness or 1
     s.Parent    = parent
-    return s
-end
-
-local function addPadding(p, parent)
-    local pad = Instance.new("UIPadding")
-    pad.PaddingLeft   = UDim.new(0, p)
-    pad.PaddingRight  = UDim.new(0, p)
-    pad.PaddingTop    = UDim.new(0, p)
-    pad.PaddingBottom = UDim.new(0, p)
-    pad.Parent        = parent
-    return pad
 end
 
 -- ─────────────────────────────────────────────────────────────
---  CASTING INDICATOR  — floating overlay near screen center-top
+--  ORBIT INDICATOR  — pressed keys orbit the mouse cursor
+-- ─────────────────────────────────────────────────────────────
+--  Shows ALL pressed keys as floating badges around the cursor.
+--  No sequence awareness — just raw input visualization.
+--  A charge arc appears on the outermost badge when holding.
 -- ─────────────────────────────────────────────────────────────
 
-local CastingIndicator = {}
-CastingIndicator.__index = CastingIndicator
+local OrbitIndicator = {}
+OrbitIndicator.__index = OrbitIndicator
 
-function CastingIndicator.new(screenGui)
-    local self = setmetatable({}, CastingIndicator)
+function OrbitIndicator.new(screenGui)
+    local self = setmetatable({}, OrbitIndicator)
 
-    self._sequence    = ""
-    self._pressed     = {}   -- set of pressed keys
-    self._pressedList = {}   -- ordered list
-    self._charge      = 0
-    self._charging    = false
+    self._sg        = screenGui
+    self._keys      = {}     -- ordered list of pressed key strings
+    self._badges    = {}     -- Frame instances
+    self._charge    = 0
+    self._charging  = false
     self._chargeStart = 0
     self._chargeDur   = HOLD_TIME
-    self._spellName   = ""
-    self._visible     = false
-    self._pos         = nil
-    self._angle       = 0
+    self._angle     = 0
+    self._visible   = false
+    self._conn      = nil
 
-    -- Root frame
+    -- Root clipping frame (invisible, just holds children in place)
     self._root = makeFrame({
-        Name              = "CastingIndicator",
-        BackgroundColor3  = THEME.ind_bg,
-        Size              = UDim2.new(0, 40, 0, 80),
-        Position          = UDim2.new(0.5, -20, 0, 32),
-        AnchorPoint       = Vector2.new(0.5, 0),
-        Visible           = false,
-        ZIndex            = 20,
-        ClipsDescendants  = false,
-    }, screenGui)
-    addCorner(10, self._root)
-    addStroke(THEME.ind_border, 1, self._root)
-
-    -- Keys row
-    self._keyRow = makeFrame({
-        Name             = "KeyRow",
+        Name             = "OrbitRoot",
         BackgroundTransparency = 1,
-        Size             = UDim2.new(1, -24, 0, 40),
-        Position         = UDim2.new(0, 12, 0, 10),
-        ZIndex           = 21,
-    }, self._root)
-    local listLayout = Instance.new("UIListLayout")
-    listLayout.FillDirection       = Enum.FillDirection.Horizontal
-    listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    listLayout.VerticalAlignment   = Enum.VerticalAlignment.Center
-    listLayout.Padding             = UDim.new(0, 6)
-    listLayout.Parent              = self._keyRow
+        Size             = UDim2.new(1, 0, 1, 0),
+        ZIndex           = 30,
+        Visible          = false,
+    }, screenGui)
 
-    -- Charge bar background
-    self._barBg = makeFrame({
-        Name             = "BarBg",
-        BackgroundColor3 = THEME.ind_key_bg,
-        Size             = UDim2.new(1, -24, 0, 6),
-        Position         = UDim2.new(0, 12, 0, 56),
-        ZIndex           = 21,
-    }, self._root)
-    addCorner(3, self._barBg)
-    addStroke(THEME.ind_border, 1, self._barBg)
-
-    -- Charge bar fill
-    self._barFill = makeFrame({
-        Name             = "BarFill",
-        BackgroundColor3 = THEME.gold_dim,
-        Size             = UDim2.new(0, 0, 1, 0),
-        ZIndex           = 22,
-    }, self._barBg)
-    addCorner(3, self._barFill)
-
-    -- Spell name label
-    self._nameLabel = makeLabel({
-        Name             = "SpellName",
-        Size             = UDim2.new(1, -24, 0, 16),
-        Position         = UDim2.new(0, 12, 0, 66),
-        Text             = "",
-        TextColor3       = THEME.ink_dim,
-        Font             = Enum.Font.Gotham,
-        TextSize         = 11,
-        TextXAlignment   = Enum.TextXAlignment.Center,
-        ZIndex           = 21,
-    }, self._root)
-
-    -- Render loop
     self._conn = RunService.Heartbeat:Connect(function(dt)
-        self:_tick()
+        if not self._visible then return end
+        self:_tick(dt)
     end)
 
-    self._keyBadges = {}
     return self
 end
 
-function CastingIndicator:_tick()
-    if not self._visible then return end
+function OrbitIndicator:_tick(dt)
+    self._angle = self._angle + dt * 1.8  -- slow orbit
 
-    local dt = RunService.Heartbeat:Wait()
-
-    -- ─── Charge Logic (unchanged) ───
-    if self._charging then
-        local elapsed = tick() - self._chargeStart
-        self._charge = math.clamp(elapsed / self._chargeDur, 0, 1)
-
-        local fillCol = lerpColor(THEME.gold_dim, THEME.ind_charge, self._charge)
-        self._barFill.BackgroundColor3 = fillCol
-        self._barFill.Size = UDim2.new(self._charge, 0, 1, 0)
-    end
-
-    -- ─── Mouse Follow ───
     local mouse = UserInputService:GetMouseLocation()
-    local cam   = workspace.CurrentCamera
-    local view  = cam.ViewportSize
-
-    -- 🔧 SETTINGS (tweak these)
-    local radius   = 40      -- distance from cursor
-    local smooth   = 0.2     -- 0 = instant, 1 = slow
-    local orbit    = true    -- true = circle around mouse
-
-    -- Orbiting motion
-    local offset
-    if orbit then
-        self._angle += dt * 4
-        offset = Vector2.new(
-            math.cos(self._angle) * radius,
-            math.sin(self._angle) * radius
-        )
-    else
-        offset = Vector2.new(20, 20)
-    end
-
-    local target = mouse + offset
-
-    -- Smooth follow
-    if not self._pos then
-        self._pos = target
-    end
-    self._pos = self._pos:Lerp(target, smooth)
-
-    -- Clamp to screen
-    local size = self._root.AbsoluteSize
-    local x = math.clamp(self._pos.X, 0, view.X - size.X)
-    local y = math.clamp(self._pos.Y, 0, view.Y - size.Y)
-
-    self._root.Position = UDim2.new(0, x, 0, y)
-end
-
-function CastingIndicator:_rebuildKeys()
-    -- Clear existing badges
-    for _, b in ipairs(self._keyBadges) do
-        b:Destroy()
-    end
-    self._keyBadges = {}
-
-    local seq = self._sequence
-    local n   = #seq
+    local n     = #self._keys
     if n == 0 then return end
 
-    local pressedCount = #self._pressedList
-
-    for i = 1, n do
-        local ch   = seq:sub(i, i)
-        local done = (i <= pressedCount)
-
-        local badge = makeFrame({
-            Name             = "Key_".. i,
-            BackgroundColor3 = done and THEME.ind_key_done or THEME.ind_key_bg,
-            Size             = UDim2.new(0, 32, 0, 36),
-            ZIndex           = 22,
-        }, self._keyRow)
-        addCorner(5, badge)
-        addStroke(done and THEME.gold or THEME.ind_border, 1, badge)
-
-        -- Glow dot
-        if done then
-            local dot = makeFrame({
-                BackgroundColor3 = THEME.gold,
-                Size             = UDim2.new(0, 6, 0, 6),
-                Position         = UDim2.new(1, -8, 0, 2),
-                ZIndex           = 23,
-            }, badge)
-            addCorner(3, dot)
-        end
-
-        makeLabel({
-            Size           = UDim2.new(1, 0, 1, 0),
-            Text           = ch,
-            TextColor3     = done and THEME.gold or THEME.ink_dim,
-            Font           = Enum.Font.Code,
-            TextSize       = 15,
-            ZIndex         = 23,
-        }, badge)
-
-        table.insert(self._keyBadges, badge)
+    -- Charge progress
+    if self._charging then
+        self._charge = math.clamp((tick() - self._chargeStart) / self._chargeDur, 0, 1)
     end
 
-    -- Resize root width to fit
-    local totalW = n * 32 + (n - 1) * 6 + 24
-    local totalH = 90
-    self._root.Size     = UDim2.new(0, math.max(totalW, 80), 0, totalH)
+    local radius = 42 + n * 4  -- slightly expand radius with more keys
+    for i, badge in ipairs(self._badges) do
+        local angle = self._angle + (i - 1) * (2 * math.pi / n)
+        local ox = math.cos(angle) * radius
+        local oy = math.sin(angle) * radius
+        local bx = mouse.X + ox - 18
+        local by = mouse.Y + oy - 18
+        badge.Position = UDim2.new(0, bx, 0, by)
 
-    -- Reposition bar and label relative to fixed offsets
-    self._barBg.Position    = UDim2.new(0, 12, 0, 52)
-    self._nameLabel.Position = UDim2.new(0, 12, 0, 66)
+        -- Charge glow on last badge
+        if self._charging and i == n then
+            local col = lerpColor(THEME.gold_dim, THEME.ind_charge, self._charge)
+            badge.BackgroundColor3 = col
+            -- pulse scale via size
+            local s = 36 + self._charge * 6
+            badge.Size = UDim2.new(0, s, 0, s)
+        end
+    end
 end
 
-function CastingIndicator:show(sequence, pressedList, spellName)
-    self._sequence    = sequence
-    self._pressedList = pressedList or {}
-    self._spellName   = spellName or ""
-    self._charging    = false
-    self._charge      = 0
-    self._visible     = true
+function OrbitIndicator:pushKey(char)
+    table.insert(self._keys, char)
+    self._visible       = true
+    self._root.Visible  = true
 
-    self._root.Visible = true
-    self._nameLabel.Text       = spellName
-    self._nameLabel.TextColor3 = THEME.ink_dim
-    self._barFill.Size         = UDim2.new(0, 0, 1, 0)
-    self._barFill.BackgroundColor3 = THEME.gold_dim
+    local badge = makeFrame({
+        Name             = "OBadge_".. #self._keys,
+        BackgroundColor3 = THEME.ind_key_bg,
+        Size             = UDim2.new(0, 36, 0, 36),
+        ZIndex           = 31,
+    }, self._root)
+    addCorner(8, badge)
+    addStroke(THEME.gold_dim, 1, badge)
 
-    self:_rebuildKeys()
+    makeLabel({
+        Size       = UDim2.new(1, 0, 1, 0),
+        Text       = char,
+        TextColor3 = THEME.gold,
+        Font       = Enum.Font.Code,
+        TextSize   = 16,
+        ZIndex     = 32,
+    }, badge)
 
-    -- Fade in
-    self._root.BackgroundTransparency = 1
-    TweenService:Create(self._root, TweenInfo.new(0.15), {
-        BackgroundTransparency = 0
-    }):Play()
+    table.insert(self._badges, badge)
 end
 
-function CastingIndicator:updatePressed(pressedList)
-    self._pressedList = pressedList or {}
-    self:_rebuildKeys()
-end
-
-function CastingIndicator:startCharge(duration)
+function OrbitIndicator:startCharge(duration)
     self._charging    = true
     self._chargeStart = tick()
     self._chargeDur   = duration or HOLD_TIME
     self._charge      = 0
-    self._nameLabel.Text       = "".. self._spellName
-    self._nameLabel.TextColor3 = THEME.ind_charge
-end
-
-function CastingIndicator:hide(fade)
-    self._charging = false
-    if not self._visible then return end
-
-    if fade then
-        local tween = TweenService:Create(self._root, TweenInfo.new(0.3), {
-            BackgroundTransparency = 1
-        })
-        tween:Play()
-        tween.Completed:Connect(function()
-            self._root.Visible = false
-            self._visible = false
-        end)
-    else
-        self._root.Visible = false
-        self._visible = false
+    -- Brighten last badge stroke
+    if #self._badges > 0 then
+        addStroke(THEME.ind_charge, 2, self._badges[#self._badges])
     end
 end
 
-function CastingIndicator:destroy()
+function OrbitIndicator:reset(instant)
+    self._charging = false
+    self._charge   = 0
+    self._keys     = {}
+    for _, b in ipairs(self._badges) do b:Destroy() end
+    self._badges = {}
+
+    if instant then
+        self._root.Visible = false
+        self._visible      = false
+    else
+        -- Fade out over 0.25s then hide
+        task.delay(0.25, function()
+            self._root.Visible = false
+            self._visible      = false
+        end)
+    end
+end
+
+function OrbitIndicator:destroy()
     if self._conn then self._conn:Disconnect() end
     if self._root then self._root:Destroy() end
 end
 
 -- ─────────────────────────────────────────────────────────────
---  CAST LOG — floating popup after casting
+--  CAST LOG
 -- ─────────────────────────────────────────────────────────────
 
 local function showCastLog(screenGui, lines)
-    local totalH = 16 + #lines * 22 + 12
-    local w      = 340
+    local totalH = 12 + #lines * 22 + 10
+    local w      = 320
 
     local root = makeFrame({
         Name             = "CastLog",
         BackgroundColor3 = THEME.ind_bg,
         Size             = UDim2.new(0, w, 0, totalH),
-        Position         = UDim2.new(0.5, -w / 2, 0, 130),
+        Position         = UDim2.new(0.5, -w / 2, 0, 120),
         BackgroundTransparency = 1,
         ZIndex = 25,
     }, screenGui)
@@ -591,21 +478,12 @@ local function showCastLog(screenGui, lines)
         y = y + 22
     end
 
-    -- Fade in
-    TweenService:Create(root, TweenInfo.new(0.2), {
-        BackgroundTransparency = 0
-    }):Play()
-
-    -- Hold then fade out
+    TweenService:Create(root, TweenInfo.new(0.2), { BackgroundTransparency = 0 }):Play()
     task.delay(3.5, function()
         if root and root.Parent then
-            local t = TweenService:Create(root, TweenInfo.new(0.6), {
-                BackgroundTransparency = 1
-            })
+            local t = TweenService:Create(root, TweenInfo.new(0.6), { BackgroundTransparency = 1 })
             t:Play()
-            t.Completed:Connect(function()
-                if root then root:Destroy() end
-            end)
+            t.Completed:Connect(function() if root then root:Destroy() end end)
         end
     end)
 end
@@ -618,24 +496,23 @@ local CastingEngine = {}
 CastingEngine.__index = CastingEngine
 
 function CastingEngine.new(screenGui, indicator)
-    local self = setmetatable({}, CastingEngine)
-
-    self._screenGui     = screenGui
-    self._indicator     = indicator
-    self._books         = {}     -- reference to lib books
-    self._pressOrder    = {}
-    self._pressedSet    = {}
-    self._lastPressTime = 0
-    self._holdThread    = nil
-    self._pendingSpell  = nil
-    self._connections   = {}
-
+    local self           = setmetatable({}, CastingEngine)
+    self._screenGui      = screenGui
+    self._indicator      = indicator  -- OrbitIndicator
+    self._books          = {}
+    self._castMode       = false
+    self._pressOrder     = {}
+    self._pressedSet     = {}
+    self._lastPressTime  = 0
+    self._holdThread     = nil
+    self._connections    = {}
+    self._castModeKey    = Enum.KeyCode.BackQuote
+    self._modeLabel      = nil  -- set externally after UI build
     return self
 end
 
-function CastingEngine:setBooks(books)
-    self._books = books
-end
+function CastingEngine:setBooks(books)    self._books = books end
+function CastingEngine:setCastModeKey(kc) self._castModeKey = kc end
 
 function CastingEngine:_allSpells()
     local all = {}
@@ -647,132 +524,164 @@ function CastingEngine:_allSpells()
     return all
 end
 
-function CastingEngine:_reset(fade)
-    self._pressOrder    = {}
-    self._pressedSet    = {}
+function CastingEngine:_findSpell(seq)
+    for _, spell in ipairs(self:_allSpells()) do
+        if spell:getSequence() == seq then
+            return spell
+        end
+    end
+    return nil
+end
+
+function CastingEngine:_reset()
+    self._pressOrder   = {}
+    self._pressedSet   = {}
     self._lastPressTime = 0
-    self._pendingSpell  = nil
     if self._holdThread then
         task.cancel(self._holdThread)
         self._holdThread = nil
     end
-    self._indicator:hide(fade or false)
+    self._indicator:reset(false)
+end
+
+function CastingEngine:_enterCastMode()
+    self._castMode = true
+    self:_reset()
+    if self._modeLabel then
+        self._modeLabel.Text      = "◆ CASTING"
+        self._modeLabel.TextColor3 = THEME.gold
+        self._modeLabel.Visible    = true
+    end
+end
+
+function CastingEngine:_exitCastMode()
+    self._castMode = false
+    self:_reset()
+    if self._modeLabel then
+        self._modeLabel.Visible = false
+    end
 end
 
 function CastingEngine:_onKeyAdded()
     local current = table.concat(self._pressOrder)
-    local allSpells = self:_allSpells()
+    local n       = #current
 
-    -- Exact match
-    for _, spell in ipairs(allSpells) do
-        if spell:getSequence() == current then
-            local pressed = {table.unpack(self._pressOrder)}
-            if not self._indicator._visible then
-                self._indicator:show(spell:getSequence(), pressed, spell.name)
-            else
-                self._indicator:updatePressed(pressed)
-            end
-            self:_startHold(spell)
-            return
-        end
+    -- Check for exact match → start hold countdown
+    local exactSpell = self:_findSpell(current)
+    if exactSpell then
+        self:_startHold(exactSpell, current)
+        return
     end
 
-    -- Partial match
-    local candidates = {}
-    for _, spell in ipairs(allSpells) do
-        if spell:getSequence():sub(1, #current) == current then
-            table.insert(candidates, spell)
-        end
-    end
-
-    if #candidates > 0 then
-        table.sort(candidates, function(a, b)
-            return #a:getSequence() < #b:getSequence()
-        end)
-        local target  = candidates[1]
-        local pressed = {table.unpack(self._pressOrder)}
-        if not self._indicator._visible then
-            self._indicator:show(target:getSequence(), pressed, target.name)
-        else
-            self._indicator:updatePressed(pressed)
-        end
-    else
-        self:_reset(false)
-    end
+    -- Otherwise just continue collecting (indicator already updated by pushKey)
+    -- Timeout check happens in onKeyDown
 end
 
-function CastingEngine:_startHold(spell)
-    self._pendingSpell = spell
-    if self._holdThread then
-        task.cancel(self._holdThread)
-    end
+function CastingEngine:_startHold(spell, seq)
+    if self._holdThread then task.cancel(self._holdThread) end
     self._indicator:startCharge(HOLD_TIME)
     self._holdThread = task.delay(HOLD_TIME, function()
-        if not self._pendingSpell then return end
+        -- Verify sequence still intact
         local current = table.concat(self._pressOrder)
-        if current ~= self._pendingSpell:getSequence() then
-            self:_reset(false)
-            return end
-        self:_cast(self._pendingSpell)
-        self:_reset(true)
+        if current ~= seq then
+            self:_reset()
+            return
+        end
+        self:_cast(spell)
+        self:_reset()
     end)
 end
 
 function CastingEngine:_cast(spell)
-    self._indicator:hide(true)
+    -- Cooldown check
+    if spell:isCoolingDown() then
+        local rem = math.ceil(spell:cooldownRemaining())
+        showCastLog(self._screenGui, {
+            { text = "On cooldown — ".. spell.name, color = THEME.orange },
+            { text = rem .. "s remaining",          color = THEME.ink_dim },
+        })
+        return
+    end
+
     local msg = randomFrom(CAST_MESSAGES)
     local success, err = pcall(spell.callback)
+    spell:onCast()
 
     local lines = {
-        { text = msg .. "[".. spell.name .. "]", color = THEME.gold }
+        { text = msg .. " — " .. spell.name, color = THEME.gold }
     }
     if success then
         table.insert(lines, { text = "The magic takes hold.", color = THEME.ink })
     else
         table.insert(lines, { text = randomFrom(SPELL_ERRORS), color = THEME.red })
         if err then
-            table.insert(lines, { text = tostring(err):sub(1, 55), color = THEME.red })
+            table.insert(lines, { text = tostring(err):sub(1, 60), color = THEME.red })
         end
+    end
+
+    if spell.cooldown > 0 then
+        table.insert(lines, { text = "Cooldown: " .. spell.cooldown .. "s", color = THEME.ink_dim })
     end
 
     showCastLog(self._screenGui, lines)
 end
 
 function CastingEngine:onKeyDown(key)
-    local sym = key.Name:upper()
-    if not CAST_KEYS:find(sym, 1, true) then return end
+    -- Cast mode toggle key
+    if key == self._castModeKey then
+        if self._castMode then
+            self:_exitCastMode()
+        else
+            self:_enterCastMode()
+        end
+        return
+    end
+
+    if not self._castMode then return end
+
+    -- Escape exits cast mode
+    if key == Enum.KeyCode.Escape then
+        self:_exitCastMode()
+        return
+    end
+
+    local char = CAST_KEY_MAP[key]
+    if not char then return end
 
     local now = tick()
     if #self._pressOrder > 0 and (now - self._lastPressTime) > TIMEOUT then
-        self:_reset(false)
+        self:_reset()
     end
     self._lastPressTime = now
 
-    if self._pressedSet[sym] then return end
-    self._pressedSet[sym] = true
-    table.insert(self._pressOrder, sym)
+    if self._pressedSet[char] then return end
+    self._pressedSet[char] = true
+    table.insert(self._pressOrder, char)
+    self._indicator:pushKey(char)
     self:_onKeyAdded()
 end
 
 function CastingEngine:onKeyUp(key)
-    local sym = key.Name:upper()
-    if self._pressedSet[sym] then
-        self:_reset(false)
+    if not self._castMode then return end
+    local char = CAST_KEY_MAP[key]
+    if char and self._pressedSet[char] then
+        -- Release cancels hold
+        if self._holdThread then
+            task.cancel(self._holdThread)
+            self._holdThread = nil
+            self:_reset()
+        end
     end
 end
 
 function CastingEngine:startListening()
-    local c1 = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
+    local c1 = UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
         if input.UserInputType == Enum.UserInputType.Keyboard then
-            if input.KeyCode == Enum.KeyCode.Escape then
-                self:_reset(false)
-                return
-            end
             self:onKeyDown(input.KeyCode)
         end
     end)
-    local c2 = UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    local c2 = UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.Keyboard then
             self:onKeyUp(input.KeyCode)
         end
@@ -782,31 +691,23 @@ function CastingEngine:startListening()
 end
 
 function CastingEngine:stopListening()
-    for _, c in ipairs(self._connections) do
-        c:Disconnect()
-    end
+    for _, c in ipairs(self._connections) do c:Disconnect() end
     self._connections = {}
 end
 
 -- ─────────────────────────────────────────────────────────────
---  SEQUENCE DISPLAY  (key badge row for a spell page)
+--  SEQUENCE BADGE ROW  (in-book display)
 -- ─────────────────────────────────────────────────────────────
 
-local function buildSequenceDisplay(parent, sequence)
+local function buildSeqRow(parent, sequence)
     local n = #sequence
-    if n == 0 then return nil end
-
-    local totalW = n * 30 + (n - 1) * 5
-    local row = makeFrame({
-        BackgroundTransparency = 1,
-        Size                   = UDim2.new(0, totalW, 0, 30),
-    }, parent)
+    if n == 0 then return end
 
     local layout = Instance.new("UIListLayout")
-    layout.FillDirection       = Enum.FillDirection.Horizontal
-    layout.VerticalAlignment   = Enum.VerticalAlignment.Center
-    layout.Padding             = UDim.new(0, 5)
-    layout.Parent              = row
+    layout.FillDirection     = Enum.FillDirection.Horizontal
+    layout.VerticalAlignment = Enum.VerticalAlignment.Center
+    layout.Padding           = UDim.new(0, 5)
+    layout.Parent            = parent
 
     for i = 1, n do
         local ch    = sequence:sub(i, i)
@@ -814,49 +715,22 @@ local function buildSequenceDisplay(parent, sequence)
             BackgroundColor3 = THEME.spine,
             Size             = UDim2.new(0, 28, 0, 28),
             ZIndex           = 12,
-        }, row)
+        }, parent)
         addCorner(4, badge)
         addStroke(THEME.gold_dim, 1, badge)
-
-        local dot = makeFrame({
-            BackgroundColor3 = THEME.gold,
-            Size             = UDim2.new(0, 5, 0, 5),
-            Position         = UDim2.new(1, -7, 0, 2),
-            ZIndex           = 13,
-        }, badge)
-        addCorner(3, dot)
-
         makeLabel({
-            Size     = UDim2.new(1, 0, 1, 0),
-            Text     = ch,
+            Size       = UDim2.new(1, 0, 1, 0),
+            Text       = ch,
             TextColor3 = THEME.gold,
-            Font     = Enum.Font.Code,
-            TextSize = 14,
-            ZIndex   = 13,
+            Font       = Enum.Font.Code,
+            TextSize   = 14,
+            ZIndex     = 13,
         }, badge)
     end
-
-    return row
 end
 
 -- ─────────────────────────────────────────────────────────────
---  PAGE TURN EFFECT
--- ─────────────────────────────────────────────────────────────
-
-local function pageTurnEffect(pageFrame, direction, onDone)
-    -- Simple scale + fade page turn feel
-    local startX = direction > 0 and 1 or -1
-    pageFrame.Position = UDim2.new(startX, 0, 0, 0)
-
-    TweenService:Create(pageFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {
-        Position = UDim2.new(0, 0, 0, 0)
-    }):Play()
-
-    task.delay(0.18, onDone)
-end
-
--- ─────────────────────────────────────────────────────────────
---  MAIN SPELLBOOK UI
+--  SPELLBOOK UI
 -- ─────────────────────────────────────────────────────────────
 
 local SpellbookUI = {}
@@ -864,32 +738,55 @@ SpellbookUI.__index = SpellbookUI
 
 function SpellbookUI.new(lib)
     local self = setmetatable({}, SpellbookUI)
-    self._lib          = lib
-    self._currentBook  = 1
-    self._currentPage  = 1
-    self._open         = false
-    self._dragging     = false
-    self._dragOffset   = Vector2.new()
-
+    self._lib         = lib
+    self._currentBook = 1
+    self._currentPage = 1
+    self._open        = false
+    self._dragging    = false
+    self._dragOffset  = Vector2.new()
     self:_buildGui()
     return self
 end
 
 function SpellbookUI:_buildGui()
-    -- ScreenGui
     local sg = make("ScreenGui", {
-        Name             = "SpellbookUI",
-        ResetOnSpawn     = false,
-        ZIndexBehavior   = Enum.ZIndexBehavior.Sibling,
-        IgnoreGuiInset   = true,
+        Name           = "SpellbookUI",
+        ResetOnSpawn   = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        IgnoreGuiInset = true,
     }, PlayerGui)
     self._screenGui = sg
 
-    -- Indicator + engine
-    self._indicator = CastingIndicator.new(sg)
+    -- Orbit indicator + engine
+    self._indicator = OrbitIndicator.new(sg)
     self._engine    = CastingEngine.new(sg, self._indicator)
     self._engine:setBooks(self._lib._books)
     self._engine:startListening()
+
+    -- Cast mode label (top-center, always visible when casting)
+    self._modeLabel = makeLabel({
+        Name           = "CastModeLabel",
+        Size           = UDim2.new(0, 120, 0, 22),
+        Position       = UDim2.new(0.5, -60, 0, 8),
+        Text           = "◆ CASTING",
+        TextColor3     = THEME.gold,
+        Font           = Enum.Font.GothamBold,
+        TextSize       = 12,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        ZIndex         = 40,
+        Visible        = false,
+    }, sg)
+    addCorner(5, self._modeLabel)
+    local mlBg = makeFrame({
+        BackgroundColor3 = THEME.ind_bg,
+        Size             = UDim2.new(1, 0, 1, 0),
+        ZIndex           = 39,
+    }, self._modeLabel)
+    addCorner(5, mlBg)
+    addStroke(THEME.gold_dim, 1, mlBg)
+    self._modeLabel.BackgroundTransparency = 1
+
+    self._engine._modeLabel = self._modeLabel
 
     -- Main window
     local win = makeFrame({
@@ -905,17 +802,6 @@ function SpellbookUI:_buildGui()
     addStroke(THEME.page_border, 1, win)
     self._window = win
 
-    -- Drop shadow
-    local shadow = makeFrame({
-        Name             = "Shadow",
-        BackgroundColor3 = Color3.new(0, 0, 0),
-        Size             = UDim2.new(1, 20, 1, 20),
-        Position         = UDim2.new(0, -10, 0, -10),
-        ZIndex           = 9,
-        BackgroundTransparency = 0.5,
-    }, win)
-    addCorner(12, shadow)
-
     self:_buildTitlebar(win)
     self:_buildSpine(win)
     self:_buildPageArea(win)
@@ -926,74 +812,55 @@ function SpellbookUI:_buildTitlebar(win)
     local bar = makeFrame({
         Name             = "TitleBar",
         BackgroundColor3 = THEME.spine,
-        Size             = UDim2.new(1, 0, 0, 40),
+        Size             = UDim2.new(1, 0, 0, 36),
         ZIndex           = 11,
     }, win)
-
-    -- Decorative top accent line
-    makeFrame({
-        BackgroundColor3 = THEME.gold_dim,
-        Size             = UDim2.new(1, 0, 0, 1),
-        ZIndex           = 12,
-    }, bar)
+    makeFrame({ BackgroundColor3 = THEME.gold_dim, Size = UDim2.new(1, 0, 0, 1), ZIndex = 12 }, bar)
 
     self._titleLabel = makeLabel({
         Size           = UDim2.new(1, -120, 1, 0),
-        Position       = UDim2.new(0, 16, 0, 0),
-        Text           = " Grimoire  ",
+        Position       = UDim2.new(0, 14, 0, 0),
+        Text           = "Grimoire",
         TextColor3     = THEME.gold,
         Font           = Enum.Font.GothamBold,
-        TextSize       = 14,
+        TextSize       = 13,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex         = 12,
     }, bar)
 
-    -- Titlebar buttons
-    local btnCfg = {
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.ink_dim,
-        Font             = Enum.Font.Code,
-        TextSize         = 11,
-        Size             = UDim2.new(0, 60, 0, 24),
-        ZIndex           = 12,
-    }
-
-    local closeBtn = makeButton(table.clone and table.clone(btnCfg) or {
+    -- Close button
+    local closeBtn = makeButton({
         BackgroundColor3 = THEME.spine,
         TextColor3       = THEME.red,
         Font             = Enum.Font.Code,
         TextSize         = 11,
-        Size             = UDim2.new(0, 36, 0, 24),
-        ZIndex           = 12,
+        Size             = UDim2.new(0, 32, 0, 22),
+        Position         = UDim2.new(1, -38, 0.5, -11),
         Text             = "[×]",
-        Position         = UDim2.new(1, -44, 0.5, -12),
+        ZIndex           = 12,
     }, bar)
-    closeBtn.Text     = "[×]"
-    closeBtn.TextColor3 = THEME.red
-    closeBtn.Size     = UDim2.new(0, 36, 0, 24)
-    closeBtn.Position = UDim2.new(1, -44, 0.5, -12)
-    closeBtn.MouseButton1Click:Connect(function() self:close() end)
     addCorner(4, closeBtn)
+    closeBtn.MouseButton1Click:Connect(function() self:close() end)
 
-    -- Books button
+    -- Books cycle button
     local booksBtn = makeButton({
         BackgroundColor3 = THEME.spine,
         TextColor3       = THEME.ink_dim,
         Font             = Enum.Font.Code,
         TextSize         = 11,
-        Size             = UDim2.new(0, 56, 0, 24),
-        Position         = UDim2.new(1, -108, 0.5, -12),
+        Size             = UDim2.new(0, 54, 0, 22),
+        Position         = UDim2.new(1, -100, 0.5, -11),
         Text             = "[books]",
         ZIndex           = 12,
     }, bar)
     addCorner(4, booksBtn)
-    booksBtn.MouseButton1Click:Connect(function() self:_openBookSwitcher() end)
+    booksBtn.MouseButton1Click:Connect(function() self:_cycleBook() end)
     self._booksBtn = booksBtn
 
     -- Drag
     bar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            self._dragging   = true
+            self._dragging  = true
             self._dragOffset = Vector2.new(
                 input.Position.X - self._window.AbsolutePosition.X,
                 input.Position.Y - self._window.AbsolutePosition.Y
@@ -1016,73 +883,53 @@ function SpellbookUI:_buildTitlebar(win)
 end
 
 function SpellbookUI:_buildSpine(win)
-    -- Left spine strip
     makeFrame({
-        Name             = "Spine",
         BackgroundColor3 = THEME.spine,
-        Size             = UDim2.new(0, 16, 1, -40),
-        Position         = UDim2.new(0, 0, 0, 40),
+        Size             = UDim2.new(0, 14, 1, -36),
+        Position         = UDim2.new(0, 0, 0, 36),
         ZIndex           = 11,
     }, win)
-
-    -- Decorative spine lines
-    local spineDetail = makeFrame({
+    makeFrame({
         BackgroundColor3 = THEME.gold_dim,
-        Size             = UDim2.new(0, 1, 1, -40),
-        Position         = UDim2.new(0, 15, 0, 40),
+        Size             = UDim2.new(0, 1, 1, -36),
+        Position         = UDim2.new(0, 13, 0, 36),
         ZIndex           = 11,
     }, win)
 end
 
 function SpellbookUI:_buildPageArea(win)
     local pageArea = makeFrame({
-        Name             = "PageArea",
         BackgroundColor3 = THEME.page_bg,
-        Size             = UDim2.new(1, -16, 1, -70),
-        Position         = UDim2.new(0, 16, 0, 40),
+        Size             = UDim2.new(1, -14, 1, -62),
+        Position         = UDim2.new(0, 14, 0, 36),
         ClipsDescendants = true,
         ZIndex           = 11,
     }, win)
     self._pageArea = pageArea
 
-    -- Subtle vignette at top of page
-    local vignette = makeFrame({
-        BackgroundColor3 = THEME.bg,
-        Size             = UDim2.new(1, 0, 0, 8),
-        ZIndex           = 12,
-    }, pageArea)
-    local grad = Instance.new("UIGradient")
-    grad.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0),
-        NumberSequenceKeypoint.new(1, 1),
-    })
-    grad.Rotation = 90
-    grad.Parent   = vignette
-
     self._pageContainer = makeFrame({
-        Name             = "PageContainer",
         BackgroundTransparency = 1,
-        Size             = UDim2.new(1, 0, 1, 0),
-        ZIndex           = 11,
+        Size                   = UDim2.new(1, 0, 1, 0),
+        ZIndex                 = 11,
     }, pageArea)
 
     self:_buildPageContent(self._pageContainer)
 end
 
-function SpellbookUI:_buildPageContent(container)
-    local pad = 28
+function SpellbookUI:_buildPageContent(c)
+    local pad = 22
 
-    -- Page number / name header row
+    -- ── Header row: page counter + book name ──
     local hdr = makeFrame({
         BackgroundTransparency = 1,
-        Size     = UDim2.new(1, -pad*2, 0, 24),
-        Position = UDim2.new(0, pad, 0, 14),
+        Size     = UDim2.new(1, -pad*2, 0, 20),
+        Position = UDim2.new(0, pad, 0, 12),
         ZIndex   = 12,
-    }, container)
+    }, c)
 
-    makeLabel({
-        Size           = UDim2.new(0, 100, 1, 0),
-        Text           = "Spell Name",
+    self._bookLabel = makeLabel({
+        Size           = UDim2.new(0.5, 0, 1, 0),
+        Text           = "",
         TextColor3     = THEME.ink_dim,
         Font           = Enum.Font.Gotham,
         TextSize       = 11,
@@ -1091,9 +938,9 @@ function SpellbookUI:_buildPageContent(container)
     }, hdr)
 
     self._pageNumLabel = makeLabel({
-        Size           = UDim2.new(0, 100, 1, 0),
-        Position       = UDim2.new(1, -100, 0, 0),
-        Text           = "Page 1 of 1",
+        Size           = UDim2.new(0.5, 0, 1, 0),
+        Position       = UDim2.new(0.5, 0, 0, 0),
+        Text           = "1 / 1",
         TextColor3     = THEME.ink_dim,
         Font           = Enum.Font.Gotham,
         TextSize       = 11,
@@ -1101,327 +948,291 @@ function SpellbookUI:_buildPageContent(container)
         ZIndex         = 12,
     }, hdr)
 
-    -- Spell name
-    self._nameBox = make("TextBox", {
-        Name             = "SpellName",
-        BackgroundTransparency = 1,
-        Size             = UDim2.new(1, -pad*2, 0, 36),
-        Position         = UDim2.new(0, pad, 0, 42),
-        Text             = "Unnamed Spell",
-        TextColor3       = THEME.gold,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 20,
-        TextXAlignment   = Enum.TextXAlignment.Left,
-        ClearTextOnFocus = false,
-        ZIndex           = 12,
-    }, container)
-
-    -- Ornamental divider
-    local divFrame = makeFrame({
-        BackgroundTransparency = 1,
-        Size     = UDim2.new(1, -pad*2, 0, 14),
-        Position = UDim2.new(0, pad, 0, 82),
-        ZIndex   = 12,
-    }, container)
-    self._divFrame = divFrame
-
-    -- Left line
-    makeFrame({
-        BackgroundColor3 = THEME.gold_dim,
-        Size             = UDim2.new(0.4, -14, 0, 1),
-        Position         = UDim2.new(0, 0, 0.5, 0),
-        ZIndex           = 12,
-    }, divFrame)
-    makeLabel({
-        Size           = UDim2.new(0, 28, 1, 0),
-        Position       = UDim2.new(0.5, -14, 0, 0),
-        Text           = "",
+    -- ── Spell name ──
+    self._nameLabel = makeLabel({
+        Size           = UDim2.new(1, -pad*2, 0, 32),
+        Position       = UDim2.new(0, pad, 0, 36),
+        Text           = "Unnamed Spell",
         TextColor3     = THEME.gold,
-        Font           = Enum.Font.SpecialElite,
-        TextSize       = 11,
-        ZIndex         = 12,
-    }, divFrame)
-    -- Right line
-    makeFrame({
-        BackgroundColor3 = THEME.gold_dim,
-        Size             = UDim2.new(0.4, -14, 0, 1),
-        Position         = UDim2.new(0.6, 14, 0.5, 0),
-        ZIndex           = 12,
-    }, divFrame)
-
-    -- Incantation label
-    makeLabel({
-        Size           = UDim2.new(1, -pad*2, 0, 18),
-        Position       = UDim2.new(0, pad, 0, 102),
-        Text           = "Incantation",
-        TextColor3     = THEME.ink_dim,
-        Font           = Enum.Font.Gotham,
-        TextSize       = 11,
+        Font           = Enum.Font.GothamBold,
+        TextSize       = 20,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex         = 12,
-    }, container)
+    }, c)
 
-    -- Code/description box (read-only display of what the spell does)
-    local codeHolder = makeFrame({
-        BackgroundColor3 = THEME.spine,
-        Size             = UDim2.new(1, -pad*2, 0, 200),
-        Position         = UDim2.new(0, pad, 0, 124),
+    -- ── Thin divider ──
+    makeFrame({
+        BackgroundColor3 = THEME.gold_dim,
+        Size             = UDim2.new(1, -pad*2, 0, 1),
+        Position         = UDim2.new(0, pad, 0, 72),
         ZIndex           = 12,
-    }, container)
-    addCorner(6, codeHolder)
-    addStroke(THEME.page_border, 1, codeHolder)
+    }, c)
 
-    self._codeLabel = makeLabel({
+    -- ── Sequence section ──
+    makeLabel({
+        Size           = UDim2.new(1, -pad*2, 0, 16),
+        Position       = UDim2.new(0, pad, 0, 82),
+        Text           = "KEY SEQUENCE",
+        TextColor3     = THEME.ink_dim,
+        Font           = Enum.Font.Gotham,
+        TextSize       = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex         = 12,
+    }, c)
+
+    self._seqHolder = makeFrame({
+        BackgroundTransparency = 1,
+        Size     = UDim2.new(1, -pad*2, 0, 34),
+        Position = UDim2.new(0, pad, 0, 100),
+        ZIndex   = 12,
+    }, c)
+
+    -- ── Spell info block ──
+    local infoHolder = makeFrame({
+        BackgroundColor3 = THEME.spine,
+        Size             = UDim2.new(1, -pad*2, 0, 130),
+        Position         = UDim2.new(0, pad, 0, 148),
+        ZIndex           = 12,
+    }, c)
+    addCorner(6, infoHolder)
+    addStroke(THEME.page_border, 1, infoHolder)
+
+    self._infoLabel = makeLabel({
         Size             = UDim2.new(1, -16, 1, -12),
         Position         = UDim2.new(0, 8, 0, 6),
-        Text             = "-- No spell description provided.",
+        Text             = "",
         TextColor3       = THEME.ink,
         Font             = Enum.Font.Code,
         TextSize         = 12,
         TextXAlignment   = Enum.TextXAlignment.Left,
         TextYAlignment   = Enum.TextYAlignment.Top,
         TextWrapped      = true,
+        RichText         = true,
         ZIndex           = 13,
-    }, codeHolder)
+    }, infoHolder)
 
-    -- Key sequence label
+    -- ── Cooldown bar ──
     makeLabel({
-        Size           = UDim2.new(0, 120, 0, 18),
-        Position       = UDim2.new(0, pad, 0, 338),
-        Text           = "Key Sequence:",
+        Size           = UDim2.new(1, -pad*2, 0, 14),
+        Position       = UDim2.new(0, pad, 0, 290),
+        Text           = "COOLDOWN",
         TextColor3     = THEME.ink_dim,
         Font           = Enum.Font.Gotham,
-        TextSize       = 11,
+        TextSize       = 10,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex         = 12,
-    }, container)
+    }, c)
 
-    self._seqHolder = makeFrame({
-        BackgroundTransparency = 1,
-        Size     = UDim2.new(1, -pad*2 - 130, 0, 36),
-        Position = UDim2.new(0, pad + 128, 0, 332),
-        ZIndex   = 12,
-    }, container)
+    self._cdHolder = makeFrame({
+        BackgroundColor3 = THEME.spine,
+        Size             = UDim2.new(1, -pad*2, 0, 22),
+        Position         = UDim2.new(0, pad, 0, 306),
+        ZIndex           = 12,
+    }, c)
+    addCorner(4, self._cdHolder)
+    addStroke(THEME.page_border, 1, self._cdHolder)
 
-    -- Cast button
-    local castBtn = makeButton({
-        Size             = UDim2.new(0, 140, 0, 36),
-        Position         = UDim2.new(0, pad, 0, 388),
+    self._cdBar = makeFrame({
         BackgroundColor3 = THEME.gold_dim,
-        Text             = " Cast Now",
+        Size             = UDim2.new(0, 0, 1, 0),
+        ZIndex           = 13,
+    }, self._cdHolder)
+    addCorner(4, self._cdBar)
+
+    self._cdLabel = makeLabel({
+        Size           = UDim2.new(1, 0, 1, 0),
+        Text           = "None",
+        TextColor3     = THEME.ink_dim,
+        Font           = Enum.Font.Code,
+        TextSize       = 11,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        ZIndex         = 14,
+    }, self._cdHolder)
+
+    -- ── Cast button + status ──
+    local castBtn = makeButton({
+        Size             = UDim2.new(0, 120, 0, 32),
+        Position         = UDim2.new(0, pad, 0, 344),
+        BackgroundColor3 = THEME.gold_dim,
+        Text             = "▶  Cast Now",
         TextColor3       = THEME.bg,
         Font             = Enum.Font.GothamBold,
         TextSize         = 13,
         ZIndex           = 12,
-    }, container)
+    }, c)
     addCorner(6, castBtn)
     castBtn.MouseButton1Click:Connect(function() self:_castCurrent() end)
     castBtn.MouseEnter:Connect(function()
-        TweenService:Create(castBtn, TweenInfo.new(0.1), {
-            BackgroundColor3 = THEME.gold
-        }):Play()
+        TweenService:Create(castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold }):Play()
     end)
     castBtn.MouseLeave:Connect(function()
-        TweenService:Create(castBtn, TweenInfo.new(0.1), {
-            BackgroundColor3 = THEME.gold_dim
-        }):Play()
+        TweenService:Create(castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold_dim }):Play()
     end)
     self._castBtn = castBtn
 
-    -- Status label
     self._statusLabel = makeLabel({
-        Size           = UDim2.new(0, 160, 0, 36),
-        Position       = UDim2.new(0, pad + 152, 0, 388),
+        Size           = UDim2.new(0, 180, 0, 32),
+        Position       = UDim2.new(0, pad + 132, 0, 344),
         Text           = "",
         TextColor3     = THEME.ink_dim,
         Font           = Enum.Font.Gotham,
         TextSize       = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex         = 12,
-    }, container)
+    }, c)
 
-    -- Book name footer label
-    self._bookLabel = makeLabel({
-        Size           = UDim2.new(1, -pad*2, 0, 18),
-        Position       = UDim2.new(0, pad, 0, 434),
-        Text           = "",
-        TextColor3     = THEME.ink_dim,
-        Font           = Enum.Font.Gotham,
-        TextSize       = 10,
-        TextXAlignment = Enum.TextXAlignment.Center,
-        ZIndex         = 12,
-    }, container)
+    -- Cooldown update loop
+    RunService.Heartbeat:Connect(function()
+        self:_tickCooldownBar()
+    end)
+end
+
+function SpellbookUI:_tickCooldownBar()
+    if not self._open then return end
+    local book = self:_currentBookF()
+    if not book or #book.spells == 0 then return end
+    local spell = book.spells[self._currentPage]
+    if not spell then return end
+
+    if spell.cooldown <= 0 then
+        self._cdBar.Size  = UDim2.new(0, 0, 1, 0)
+        self._cdLabel.Text = "None"
+        return
+    end
+
+    local rem = spell:cooldownRemaining()
+    local frac = 1 - (rem / spell.cooldown)
+    TweenService:Create(self._cdBar, TweenInfo.new(0.1), {
+        Size = UDim2.new(frac, 0, 1, 0)
+    }):Play()
+
+    if rem > 0 then
+        self._cdBar.BackgroundColor3 = lerpColor(THEME.red, THEME.green, frac)
+        self._cdLabel.Text = string.format("%.1fs / %.0fs", rem, spell.cooldown)
+    else
+        self._cdBar.BackgroundColor3 = THEME.green
+        self._cdLabel.Text = "Ready  (%.0fs)":format(spell.cooldown)
+    end
 end
 
 function SpellbookUI:_buildBottomBar(win)
     local bar = makeFrame({
-        Name             = "BottomBar",
         BackgroundColor3 = THEME.spine,
-        Size             = UDim2.new(1, 0, 0, 30),
-        Position         = UDim2.new(0, 0, 1, -30),
+        Size             = UDim2.new(1, 0, 0, 26),
+        Position         = UDim2.new(0, 0, 1, -26),
         ZIndex           = 11,
     }, win)
+    makeFrame({ BackgroundColor3 = THEME.gold_dim, Size = UDim2.new(1, 0, 0, 1), ZIndex = 12 }, bar)
 
-    -- Top accent
-    makeFrame({
-        BackgroundColor3 = THEME.gold_dim,
-        Size             = UDim2.new(1, 0, 0, 1),
-        ZIndex           = 12,
+    local function navBtn(text, x, cb)
+        local b = makeButton({
+            BackgroundColor3 = THEME.spine,
+            TextColor3       = THEME.gold,
+            Font             = Enum.Font.GothamBold,
+            TextSize         = 13,
+            Size             = UDim2.new(0, 26, 0, 22),
+            Position         = UDim2.new(0, x, 0, 2),
+            Text             = text,
+            ZIndex           = 12,
+        }, bar)
+        addCorner(4, b)
+        b.MouseButton1Click:Connect(cb)
+        return b
+    end
+
+    self._prevBtn = navBtn("◀", 6,  function() self:_prevPage() end)
+    self._nextBtn = navBtn("▶", 36, function() self:_nextPage() end)
+    navBtn("↑", 72,  function() self:_reorder(-1) end)
+    navBtn("↓", 102, function() self:_reorder(1)  end)
+
+    -- Cast mode hint
+    makeLabel({
+        Size           = UDim2.new(0, 200, 1, 0),
+        Position       = UDim2.new(1, -206, 0, 0),
+        Text           = "` = toggle casting mode",
+        TextColor3     = THEME.ink_dim,
+        Font           = Enum.Font.Code,
+        TextSize       = 10,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        ZIndex         = 12,
     }, bar)
-
-    local navCfg = {
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.gold,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 14,
-        Size             = UDim2.new(0, 30, 0, 26),
-        ZIndex           = 12,
-    }
-
-    -- Prev
-    local prevBtn = makeButton({
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.gold,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 14,
-        Size             = UDim2.new(0, 30, 0, 26),
-        Position         = UDim2.new(0, 6, 0, 2),
-        Text             = "◀",
-        ZIndex           = 12,
-    }, bar)
-    addCorner(4, prevBtn)
-    prevBtn.MouseButton1Click:Connect(function() self:_prevPage() end)
-    self._prevBtn = prevBtn
-
-    -- Next
-    local nextBtn = makeButton({
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.gold,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 14,
-        Size             = UDim2.new(0, 30, 0, 26),
-        Position         = UDim2.new(0, 40, 0, 2),
-        Text             = "▶",
-        ZIndex           = 12,
-    }, bar)
-    addCorner(4, nextBtn)
-    nextBtn.MouseButton1Click:Connect(function() self:_nextPage() end)
-    self._nextBtn = nextBtn
-
-    -- Up/down reorder
-    local upBtn = makeButton({
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.gold,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 14,
-        Size             = UDim2.new(0, 26, 0, 26),
-        Position         = UDim2.new(0, 80, 0, 2),
-        Text             = "↑",
-        ZIndex           = 12,
-    }, bar)
-    addCorner(4, upBtn)
-    upBtn.MouseButton1Click:Connect(function() self:_reorder(-1) end)
-
-    local downBtn = makeButton({
-        BackgroundColor3 = THEME.spine,
-        TextColor3       = THEME.gold,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 14,
-        Size             = UDim2.new(0, 26, 0, 26),
-        Position         = UDim2.new(0, 110, 0, 2),
-        Text             = "↓",
-        ZIndex           = 12,
-    }, bar)
-    addCorner(4, downBtn)
-    downBtn.MouseButton1Click:Connect(function() self:_reorder(1) end)
 end
 
--- ── Rendering ─────────────────────────────────────────────────
+-- ── Rendering ──────────────────────────────────────────────────
 
 function SpellbookUI:_currentBookF()
     return self._lib._books[self._currentBook]
 end
 
 function SpellbookUI:_renderPage()
-    local book = self:_currentBookF()
+    local book   = self:_currentBookF()
     if not book then return end
-
     local spells = book.spells
     local total  = math.max(#spells, 1)
-    local idx    = self._currentPage
+    local idx    = math.clamp(self._currentPage, 1, math.max(#spells, 1))
+    self._currentPage = idx
 
-    -- Clamp
-    if idx > #spells then
-        idx = #spells
-        self._currentPage = idx
-    end
-    if idx < 1 then
-        idx = 1
-        self._currentPage = idx
-    end
-
-    self._pageNumLabel.Text = "Page ".. idx .. "of ".. total
+    self._pageNumLabel.Text = idx .. " / " .. total
     self._prevBtn.TextColor3 = (idx > 1)        and THEME.gold or THEME.ink_dim
     self._nextBtn.TextColor3 = (idx < #spells)  and THEME.gold or THEME.ink_dim
-    self._titleLabel.Text    = " ".. book.name .. " "
+    self._titleLabel.Text    = book.name
     self._bookLabel.Text     = book.name
 
     if #spells == 0 then
-        self._nameBox.Text  = "Empty Grimoire"
-        self._codeLabel.Text = "No spells in this book.\n-- Use :addSpell() to add one."
-        self:_clearSeqDisplay()
+        self._nameLabel.Text  = "Empty Grimoire"
+        self._infoLabel.Text  = "No spells.\nUse :addSpell() to add one."
+        self:_clearSeq()
+        self._cdLabel.Text    = "None"
         return
     end
 
     local spell = spells[idx]
-    self._nameBox.Text   = spell.name
-    self._codeLabel.Text = " Spell incantation bound to: ".. spell.name
-                        .. "\n Sequence: ".. spell:getSequence()
-                        .. "\n\n Hold the final key in the\n sequence for 1s to cast."
+    self._nameLabel.Text = spell.name
+
+    -- Info block
+    local seqStr = spell:getSequence()
+    self._infoLabel.Text =
+        "<font color='#6060a0'>sequence</font>   " .. seqStr
+        .. "\n<font color='#6060a0'>hold final key</font>  " .. HOLD_TIME .. "s to cast"
+        .. "\n<font color='#6060a0'>cooldown</font>   " .. (spell.cooldown > 0 and spell.cooldown .. "s" or "none")
+
     self._statusLabel.Text = ""
-    self:_rebuildSeqDisplay(spell:getSequence())
+    self:_rebuildSeq(seqStr)
 end
 
-function SpellbookUI:_clearSeqDisplay()
-    for _, c in ipairs(self._seqHolder:GetChildren()) do
-        c:Destroy()
-    end
+function SpellbookUI:_clearSeq()
+    for _, ch in ipairs(self._seqHolder:GetChildren()) do ch:Destroy() end
 end
 
-function SpellbookUI:_rebuildSeqDisplay(sequence)
-    self:_clearSeqDisplay()
-    buildSequenceDisplay(self._seqHolder, sequence)
+function SpellbookUI:_rebuildSeq(seq)
+    self:_clearSeq()
+    buildSeqRow(self._seqHolder, seq)
 end
 
 -- ── Navigation ─────────────────────────────────────────────────
 
 function SpellbookUI:_prevPage()
     local book = self:_currentBookF()
-    if not book then return end
-    if self._currentPage > 1 then
-        self._currentPage = self._currentPage - 1
-        self:_renderPage()
-    end
+    if not book or self._currentPage <= 1 then return end
+    self._currentPage -= 1
+    self:_renderPage()
 end
 
 function SpellbookUI:_nextPage()
     local book = self:_currentBookF()
-    if not book then return end
-    if self._currentPage < #book.spells then
-        self._currentPage = self._currentPage + 1
-        self:_renderPage()
-    end
-end
-
-function SpellbookUI:_reorder(direction)
-    local book = self:_currentBookF()
-    if not book then return end
-    local newIdx = book:moveSpell(self._currentPage, direction)
-    self._currentPage = newIdx
+    if not book or self._currentPage >= #book.spells then return end
+    self._currentPage += 1
     self:_renderPage()
 end
 
--- ── Spell actions ──────────────────────────────────────────────
+function SpellbookUI:_reorder(dir)
+    local book = self:_currentBookF()
+    if not book then return end
+    self._currentPage = book:moveSpell(self._currentPage, dir)
+    self:_renderPage()
+end
+
+-- ── Cast current ───────────────────────────────────────────────
 
 function SpellbookUI:_castCurrent()
     local book = self:_currentBookF()
@@ -1429,41 +1240,29 @@ function SpellbookUI:_castCurrent()
     local spell = book.spells[self._currentPage]
     if not spell then return end
 
-    -- Flash cast button
-    TweenService:Create(self._castBtn, TweenInfo.new(0.1), {
-        BackgroundColor3 = THEME.gold
-    }):Play()
+    TweenService:Create(self._castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold }):Play()
     task.delay(0.2, function()
-        TweenService:Create(self._castBtn, TweenInfo.new(0.1), {
-            BackgroundColor3 = THEME.gold_dim
-        }):Play()
+        TweenService:Create(self._castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold_dim }):Play()
     end)
-
     self._engine:_cast(spell)
 end
 
--- ── Book switcher ──────────────────────────────────────────────
+-- ── Book cycle ─────────────────────────────────────────────────
 
-function SpellbookUI:_openBookSwitcher()
+function SpellbookUI:_cycleBook()
     local books = self._lib._books
     if #books <= 1 then
         self._statusLabel.Text       = "No other books."
         self._statusLabel.TextColor3 = THEME.ink_dim
-        task.delay(2, function()
-            if self._statusLabel then self._statusLabel.Text = ""end
-        end)
+        task.delay(2, function() if self._statusLabel then self._statusLabel.Text = "" end end)
         return
     end
-
-    -- Cycle to next book
     self._currentBook = (self._currentBook % #books) + 1
     self._currentPage = 1
     self:_renderPage()
-    self._statusLabel.Text       = "Switched to: ".. books[self._currentBook].name
+    self._statusLabel.Text       = "→ " .. books[self._currentBook].name
     self._statusLabel.TextColor3 = THEME.green
-    task.delay(2, function()
-        if self._statusLabel then self._statusLabel.Text = ""end
-    end)
+    task.delay(2, function() if self._statusLabel then self._statusLabel.Text = "" end end)
 end
 
 -- ── Toggle ─────────────────────────────────────────────────────
@@ -1472,17 +1271,14 @@ function SpellbookUI:open()
     self._open = true
     self._window.Visible = true
     self:_renderPage()
-    -- Animate in
     self._window.BackgroundTransparency = 1
-    TweenService:Create(self._window, TweenInfo.new(0.25, Enum.EasingStyle.Quad), {
+    TweenService:Create(self._window, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {
         BackgroundTransparency = 0
     }):Play()
 end
 
 function SpellbookUI:close()
-    local t = TweenService:Create(self._window, TweenInfo.new(0.2), {
-        BackgroundTransparency = 1
-    })
+    local t = TweenService:Create(self._window, TweenInfo.new(0.18), { BackgroundTransparency = 1 })
     t:Play()
     t.Completed:Connect(function()
         self._window.Visible = false
@@ -1491,11 +1287,7 @@ function SpellbookUI:close()
 end
 
 function SpellbookUI:toggle()
-    if self._open then
-        self:close()
-    else
-        self:open()
-    end
+    if self._open then self:close() else self:open() end
 end
 
 function SpellbookUI:destroy()
@@ -1512,32 +1304,32 @@ local SpellbookLib = {}
 SpellbookLib.__index = SpellbookLib
 
 --[[
-    Creates a new SpellbookLib instance.
+    SpellbookLib.new(config?)
     
-    @param config  (optional) table:
-        toggleKey   Enum.KeyCode  — key to show/hide the grimoire window (default: Enum.KeyCode.RightBracket)
-        autoOpen    bool          — open the window immediately (default: false)
-    
-    @returns SpellbookLib
---]]
+    config:
+        toggleKey     Enum.KeyCode  window toggle key     (default: RightBracket)
+        castModeKey   Enum.KeyCode  enter/exit cast mode  (default: BackQuote `)
+        autoOpen      bool          open immediately       (default: false)
+]]
 function SpellbookLib.new(config)
     local self = setmetatable({}, SpellbookLib)
     config = config or {}
 
-    self._books = {}
-    self._ui    = nil
+    self._books          = {}
+    self._ui             = nil
+    self._usedSequences  = {}   -- global dedup table
 
-    local toggleKey = config.toggleKey or Enum.KeyCode.RightBracket
-    local autoOpen  = config.autoOpen   or false
+    local toggleKey   = config.toggleKey   or Enum.KeyCode.RightBracket
+    local castModeKey = config.castModeKey or Enum.KeyCode.BackQuote
+    local autoOpen    = config.autoOpen    or false
 
-    -- Build UI deferred so books can be added first
     task.defer(function()
         self._ui = SpellbookUI.new(self)
+        self._ui._engine:setCastModeKey(castModeKey)
         if autoOpen then self._ui:open() end
 
-        -- Toggle key
-        UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if gameProcessed then return end
+        UserInputService.InputBegan:Connect(function(input, gp)
+            if gp then return end
             if input.KeyCode == toggleKey then
                 self._ui:toggle()
             end
@@ -1548,52 +1340,74 @@ function SpellbookLib.new(config)
 end
 
 --[[
-    Add a new book (tab/chapter) to the grimoire.
-    
-    @param name  string  — display name of the book
-    @returns Book
---]]
+    lib:addBook(name) → Book
+]]
 function SpellbookLib:addBook(name)
     local book = Book.new(name)
     table.insert(self._books, book)
-    -- Keep engine in sync if UI already built
-    if self._ui then
-        self._ui._engine:setBooks(self._books)
-    end
+    if self._ui then self._ui._engine:setBooks(self._books) end
     return book
 end
 
 --[[
-    Directly open the grimoire window.
---]]
-function SpellbookLib:open()
-    if self._ui then self._ui:open() end
+    book:addSpell(name, callback, opts?)
+    opts: { cooldown = number }
+    
+    Sequences are guaranteed unique across ALL books.
+]]
+local _origAddSpell = Book.addSpell
+function Book:addSpell(name, callback, opts)
+    local spell = Spell.new(name, callback, opts)
+    -- sequence assigned by lib when registered; if called directly, generate without dedup
+    if not spell._sequence then
+        spell._sequence = generateSequence(name, tostring(name), {})
+    end
+    table.insert(self.spells, spell)
+    return spell
 end
 
---[[
-    Directly close the grimoire window.
---]]
-function SpellbookLib:close()
-    if self._ui then self._ui:close() end
+-- Override when added via lib so we can guarantee global uniqueness
+function SpellbookLib:addSpellToBook(book, name, callback, opts)
+    local spell = Spell.new(name, callback, opts)
+    spell._sequence = generateSequence(name, tostring(#self._usedSequences), self._usedSequences)
+    table.insert(book.spells, spell)
+    if self._ui then self._ui._engine:setBooks(self._books) end
+    return spell
 end
 
---[[
-    Toggle the grimoire window visibility.
---]]
-function SpellbookLib:toggle()
-    if self._ui then self._ui:toggle() end
+-- Convenience: addBook returns a book whose addSpell is dedup-aware
+function SpellbookLib:addBook(name)
+    local lib  = self
+    local book = Book.new(name)
+
+    -- Wrap addSpell to use lib's dedup table
+    book.addSpell = function(bk, spellName, callback, opts)
+        local spell = Spell.new(spellName, callback, opts)
+        spell._sequence = generateSequence(
+            spellName,
+            tostring(#lib._usedSequences + math.random(1, 9999)),
+            lib._usedSequences
+        )
+        table.insert(bk.spells, spell)
+        if lib._ui then lib._ui._engine:setBooks(lib._books) end
+        return spell
+    end
+
+    table.insert(self._books, book)
+    if self._ui then self._ui._engine:setBooks(self._books) end
+    return book
 end
 
---[[
-    Destroy the entire library and its GUI.
---]]
+function SpellbookLib:open()    if self._ui then self._ui:open()   end end
+function SpellbookLib:close()   if self._ui then self._ui:close()  end end
+function SpellbookLib:toggle()  if self._ui then self._ui:toggle() end end
+
 function SpellbookLib:destroy()
     if self._ui then self._ui:destroy() end
     self._books = {}
+    self._usedSequences = {}
 end
 
--- ─────────────────────────────────────────────────────────────
---  RETURN MODULE
 -- ─────────────────────────────────────────────────────────────
 
 return SpellbookLib
