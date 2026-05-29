@@ -1320,7 +1320,7 @@ function SpellbookLib.new(config)
     self._usedSequences  = {}   -- global dedup table
 
     local toggleKey   = config.toggleKey   or Enum.KeyCode.RightBracket
-    local castModeKey = config.castModeKey or Enum.KeyCode.BackQuote
+    local castModeKey = config.castModeKey or Enum.KeyCode.Tilde
     local autoOpen    = config.autoOpen    or false
 
     task.defer(function()
