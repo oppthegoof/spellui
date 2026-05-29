@@ -7,21 +7,23 @@
 ║    local SpellbookLib = loadstring(...)()                    ║
 ║    local lib = SpellbookLib.new()                            ║
 ║    local book = lib:addBook("Grimoire")                      ║
-║    book:addSpell("Luminary", function()                      ║
-║        print("Let there be light!")                          ║
-║    end)                                                      ║
-║    book:addSpell("Blaze", function() end, { cooldown = 5 })  ║
-║    lib:open()                                                ║
+║    book:addSpell("Fireball", function() end)                 ║
+║    book:addSpell("Blaze", function() end, {                  ║
+║        cooldown    = 5,                                      ║
+║        keyHoldTime = 0.3,   -- seconds per key (optional)   ║
+║    })                                                        ║
 ╠══════════════════════════════════════════════════════════════╣
-║  CASTING:                                                    ║
+║  CASTING (new chord system):                                 ║
 ║    Press castModeKey (default: `) to enter casting mode      ║
-║    Press number keys 1-9, 0 in sequence                      ║
-║    Hold the FINAL key for 1 second to cast                   ║
-║    Release any key before hold completes = cancel            ║
+║    Press key 1 and HOLD for keyHoldTime before pressing key 2║
+║    Keep ALL previous keys held while adding new ones         ║
+║    Releasing ANY key mid-sequence = instant fail             ║
+║    Once full sequence is held, hold final key 1s to cast     ║
+║    Going idle (no keys held) resets automatically            ║
 ║    Escape / castModeKey again = exit casting mode            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  IN-BOOK CONTROLS:                                           ║
-║    ← / → Arrow keys   : Turn pages                           ║
+║    ◀ / ▶ buttons      : Turn pages                           ║
 ║    ↑ / ↓ buttons      : Reorder spell in book                ║
 ║    [books] button     : Cycle to next book                   ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -43,11 +45,10 @@ local PlayerGui         = LocalPlayer:WaitForChild("PlayerGui")
 --  CONSTANTS & THEME
 -- ─────────────────────────────────────────────────────────────
 
--- Number keys only — zero keybind conflicts with tools/actions
-local CAST_KEYS    = "1234567890"
+local CAST_KEYS = "1234567890"
 local CAST_KEY_CODES = {
-    Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three,
-    Enum.KeyCode.Four, Enum.KeyCode.Five, Enum.KeyCode.Six,
+    Enum.KeyCode.One,   Enum.KeyCode.Two,   Enum.KeyCode.Three,
+    Enum.KeyCode.Four,  Enum.KeyCode.Five,  Enum.KeyCode.Six,
     Enum.KeyCode.Seven, Enum.KeyCode.Eight, Enum.KeyCode.Nine,
     Enum.KeyCode.Zero,
 }
@@ -57,21 +58,23 @@ for i, kc in ipairs(CAST_KEY_CODES) do
 end
 
 local THEME = {
-    bg           = Color3.fromHex("0d0d14"),
-    page_bg      = Color3.fromHex("12121e"),
-    page_border  = Color3.fromHex("2a2a4a"),
-    ink          = Color3.fromHex("c8c8e8"),
-    ink_dim      = Color3.fromHex("6060a0"),
-    gold         = Color3.fromHex("c8a84b"),
-    gold_dim     = Color3.fromHex("7a6530"),
-    red          = Color3.fromHex("c84b4b"),
-    green        = Color3.fromHex("4bc87a"),
-    orange       = Color3.fromHex("e8944a"),
-    spine        = Color3.fromHex("1a1a2e"),
-    ind_bg       = Color3.fromHex("0a0a14"),
-    ind_border   = Color3.fromHex("2a2a50"),
-    ind_key_bg   = Color3.fromHex("14142a"),
-    ind_charge   = Color3.fromHex("e8c86a"),
+    bg          = Color3.fromHex("0d0d14"),
+    page_bg     = Color3.fromHex("12121e"),
+    page_border = Color3.fromHex("2a2a4a"),
+    ink         = Color3.fromHex("c8c8e8"),
+    ink_dim     = Color3.fromHex("6060a0"),
+    gold        = Color3.fromHex("c8a84b"),
+    gold_dim    = Color3.fromHex("7a6530"),
+    red         = Color3.fromHex("c84b4b"),
+    red_bright  = Color3.fromHex("ff6060"),
+    green       = Color3.fromHex("4bc87a"),
+    orange      = Color3.fromHex("e8944a"),
+    spine       = Color3.fromHex("1a1a2e"),
+    ind_bg      = Color3.fromHex("0a0a14"),
+    ind_border  = Color3.fromHex("2a2a50"),
+    ind_key_bg  = Color3.fromHex("14142a"),
+    ind_charge  = Color3.fromHex("e8c86a"),
+    ind_ready   = Color3.fromHex("ffffff"),
 }
 
 local SPELL_ERRORS = {
@@ -93,10 +96,11 @@ local CAST_MESSAGES = {
     "Spell cast",
 }
 
-local HOLD_TIME   = 1.0
-local TIMEOUT     = 5.0
-local WIN_W       = 400
-local WIN_H       = 480
+local HOLD_TIME      = 1.0    -- final hold to cast
+local KEY_HOLD_TIME  = 0.5    -- default per-key hold before next key allowed
+local IDLE_RESET     = 1.2    -- seconds of no-keys-held before auto-reset in cast mode
+local WIN_W          = 400
+local WIN_H          = 480
 
 -- ─────────────────────────────────────────────────────────────
 --  UTILITY
@@ -123,11 +127,9 @@ local function hashString(s)
     return h
 end
 
--- Generate a sequence using only CAST_KEYS digits, no duplicates within seq
--- Also accepts a `usedSequences` set to guarantee global uniqueness
 local function generateSequence(name, seed, usedSequences, maxAttempts)
-    usedSequences  = usedSequences or {}
-    maxAttempts    = maxAttempts or 200
+    usedSequences = usedSequences or {}
+    maxAttempts   = maxAttempts   or 200
 
     local nameLen = #(name:match("^%s*(.-)%s*$") or "")
     local length
@@ -140,7 +142,6 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
     else
         length = 5
     end
-    -- cap to available digits
     length = math.min(length, #CAST_KEYS)
 
     local attempt = 0
@@ -180,9 +181,6 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
             end
         end
     end
-
-    -- Fallback: just pick any unused sequence
-    -- (extremely unlikely to reach here in practice)
     return "1"
 end
 
@@ -195,12 +193,13 @@ Spell.__index = Spell
 
 function Spell.new(name, callback, opts)
     opts = opts or {}
-    local self    = setmetatable({}, Spell)
-    self.name      = name or "Unnamed Spell"
-    self.callback  = callback or function() end
-    self.cooldown  = opts.cooldown or 0   -- seconds; 0 = no cooldown
-    self._lastCast = 0
-    self._sequence = nil
+    local self      = setmetatable({}, Spell)
+    self.name       = name or "Unnamed Spell"
+    self.callback   = callback or function() end
+    self.cooldown   = opts.cooldown    or 0
+    self.keyHoldTime = opts.keyHoldTime or KEY_HOLD_TIME
+    self._lastCast  = 0
+    self._sequence  = nil
     return self
 end
 
@@ -234,9 +233,9 @@ local Book = {}
 Book.__index = Book
 
 function Book.new(name)
-    local self   = setmetatable({}, Book)
-    self.name    = name or "Grimoire"
-    self.spells  = {}
+    local self  = setmetatable({}, Book)
+    self.name   = name or "Grimoire"
+    self.spells = {}
     return self
 end
 
@@ -307,40 +306,39 @@ local function addStroke(color, thickness, parent)
     s.Color     = color or THEME.page_border
     s.Thickness = thickness or 1
     s.Parent    = parent
+    return s
 end
 
 -- ─────────────────────────────────────────────────────────────
---  ORBIT INDICATOR  — pressed keys orbit the mouse cursor
+--  ORBIT INDICATOR
 -- ─────────────────────────────────────────────────────────────
---  Shows ALL pressed keys as floating badges around the cursor.
---  No sequence awareness — just raw input visualization.
---  A charge arc appears on the outermost badge when holding.
+-- Each badge orbits the cursor. Badges show per-key hold progress
+-- as a glowing fill. On fail, all badges drift outward and fade.
 -- ─────────────────────────────────────────────────────────────
 
 local OrbitIndicator = {}
 OrbitIndicator.__index = OrbitIndicator
 
 function OrbitIndicator.new(screenGui)
-    local self = setmetatable({}, OrbitIndicator)
+    local self          = setmetatable({}, OrbitIndicator)
+    self._sg            = screenGui
+    self._keys          = {}      -- char strings in order
+    self._badges        = {}      -- { frame, glow, fill, stroke, label, holdStart, holdDur, done }
+    self._charge        = 0
+    self._charging      = false
+    self._chargeStart   = 0
+    self._chargeDur     = HOLD_TIME
+    self._angle         = 0
+    self._visible       = false
+    self._dying         = false   -- true during fail animation
+    self._conn          = nil
 
-    self._sg        = screenGui
-    self._keys      = {}     -- ordered list of pressed key strings
-    self._badges    = {}     -- Frame instances
-    self._charge    = 0
-    self._charging  = false
-    self._chargeStart = 0
-    self._chargeDur   = HOLD_TIME
-    self._angle     = 0
-    self._visible   = false
-    self._conn      = nil
-
-    -- Root clipping frame (invisible, just holds children in place)
     self._root = makeFrame({
-        Name             = "OrbitRoot",
+        Name                   = "OrbitRoot",
         BackgroundTransparency = 1,
-        Size             = UDim2.new(1, 0, 1, 0),
-        ZIndex           = 30,
-        Visible          = false,
+        Size                   = UDim2.new(1, 0, 1, 0),
+        ZIndex                 = 30,
+        Visible                = false,
     }, screenGui)
 
     self._conn = RunService.Heartbeat:Connect(function(dt)
@@ -351,62 +349,163 @@ function OrbitIndicator.new(screenGui)
     return self
 end
 
+-- Build a single orbital badge for key `char`
+-- holdDur = seconds this badge needs to be held before it's "charged"
+function OrbitIndicator:_makeBadge(char, holdDur)
+    local SIZE = 38
+
+    -- Outer container
+    local frame = makeFrame({
+        BackgroundColor3 = THEME.ind_key_bg,
+        Size             = UDim2.new(0, SIZE, 0, SIZE),
+        ZIndex           = 31,
+    }, self._root)
+    addCorner(10, frame)
+
+    -- Stroke — starts dim, brightens as key charges
+    local stroke = addStroke(THEME.ind_border, 1.5, frame)
+
+    -- Bloom glow layer (slightly larger, behind, very transparent)
+    local glow = makeFrame({
+        BackgroundColor3       = THEME.gold_dim,
+        BackgroundTransparency = 0.85,
+        Size                   = UDim2.new(1, 14, 1, 14),
+        Position               = UDim2.new(0, -7, 0, -7),
+        ZIndex                 = 30,
+    }, frame)
+    addCorner(14, glow)
+
+    -- Fill bar (bottom to top) showing hold progress
+    local fill = makeFrame({
+        BackgroundColor3 = THEME.gold_dim,
+        Size             = UDim2.new(1, 0, 0, 0),   -- height grows upward
+        Position         = UDim2.new(0, 0, 1, 0),   -- anchored to bottom
+        ZIndex           = 32,
+    }, frame)
+    -- Clip fill inside the badge shape
+    local fillClip = makeFrame({
+        BackgroundTransparency = 1,
+        Size                   = UDim2.new(1, 0, 1, 0),
+        ClipsDescendants       = true,
+        ZIndex                 = 31,
+    }, frame)
+    fill.Parent = fillClip
+    addCorner(9, fillClip)
+
+    -- Key label
+    local label = makeLabel({
+        Size           = UDim2.new(1, 0, 1, 0),
+        Text           = char,
+        TextColor3     = THEME.ink_dim,
+        Font           = Enum.Font.Code,
+        TextSize       = 16,
+        ZIndex         = 33,
+    }, frame)
+
+    return {
+        frame     = frame,
+        glow      = glow,
+        fill      = fill,
+        fillClip  = fillClip,
+        stroke    = stroke,
+        label     = label,
+        holdStart = tick(),
+        holdDur   = holdDur or KEY_HOLD_TIME,
+        done      = false,        -- true once held for holdDur
+    }
+end
+
 function OrbitIndicator:_tick(dt)
-    self._angle = self._angle + dt * 1.8  -- slow orbit
+    self._angle = self._angle + dt * 1.6
 
     local mouse = UserInputService:GetMouseLocation()
-    local n     = #self._keys
+    local n     = #self._badges
     if n == 0 then return end
 
-    -- Charge progress
+    -- Final charge progress
     if self._charging then
-        self._charge = math.clamp((tick() - self._chargeStart) / self._chargeDur, 0, 1)
+        self._charge = math.clamp(
+            (tick() - self._chargeStart) / self._chargeDur, 0, 1)
     end
 
-    local radius = 42 + n * 4  -- slightly expand radius with more keys
-    for i, badge in ipairs(self._badges) do
+    local radius = 46 + n * 5
+
+    for i, b in ipairs(self._badges) do
         local angle = self._angle + (i - 1) * (2 * math.pi / n)
         local ox = math.cos(angle) * radius
         local oy = math.sin(angle) * radius
-        local bx = mouse.X + ox - 18
-        local by = mouse.Y + oy - 18
-        badge.Position = UDim2.new(0, bx, 0, by)
 
-        -- Charge glow on last badge
-        if self._charging and i == n then
-            local col = lerpColor(THEME.gold_dim, THEME.ind_charge, self._charge)
-            badge.BackgroundColor3 = col
-            -- pulse scale via size
-            local s = 36 + self._charge * 6
-            badge.Size = UDim2.new(0, s, 0, s)
+        if not self._dying then
+            b.frame.Position = UDim2.new(0, mouse.X + ox - 19, 0, mouse.Y + oy - 19)
+        end
+
+        -- Per-key hold fill progress
+        local held = math.clamp((tick() - b.holdStart) / b.holdDur, 0, 1)
+
+        -- Once filled, mark done
+        if not b.done and held >= 1 then
+            b.done = true
+        end
+
+        if not b.done then
+            -- Fill growing upward
+            local fillH = held
+            b.fill.Size     = UDim2.new(1, 0, fillH, 0)
+            b.fill.Position = UDim2.new(0, 0, 1 - fillH, 0)
+
+            -- Stroke pulses from dim → gold as it fills
+            b.stroke.Color     = lerpColor(THEME.ind_border, THEME.gold_dim, held)
+            b.stroke.Thickness = 1.5 + held * 1
+
+            -- Glow intensity builds
+            b.glow.BackgroundColor3       = lerpColor(THEME.ind_key_bg, THEME.gold, held)
+            b.glow.BackgroundTransparency = 0.85 - held * 0.25
+
+            b.label.TextColor3 = lerpColor(THEME.ink_dim, THEME.gold, held)
+
+        else
+            -- Fully held: bright filled look
+            b.fill.Size     = UDim2.new(1, 0, 1, 0)
+            b.fill.Position = UDim2.new(0, 0, 0, 0)
+            b.fill.BackgroundColor3 = THEME.gold_dim
+
+            b.stroke.Color     = THEME.gold
+            b.stroke.Thickness = 2
+
+            b.glow.BackgroundColor3       = THEME.gold
+            b.glow.BackgroundTransparency = 0.6
+
+            b.label.TextColor3 = THEME.bg
+
+            -- Final charge: last badge pulses white
+            if self._charging and i == n then
+                local col = lerpColor(THEME.gold, THEME.ind_ready, self._charge)
+                b.fill.BackgroundColor3         = col
+                b.glow.BackgroundColor3         = col
+                b.glow.BackgroundTransparency   = 0.4 - self._charge * 0.3
+                b.stroke.Color                  = col
+                b.stroke.Thickness              = 2 + self._charge * 2
+                -- slight size pulse
+                local s = 38 + self._charge * 8
+                b.frame.Size = UDim2.new(0, s, 0, s)
+            end
         end
     end
 end
 
-function OrbitIndicator:pushKey(char)
+function OrbitIndicator:pushKey(char, holdDur)
     table.insert(self._keys, char)
-    self._visible       = true
-    self._root.Visible  = true
+    self._visible      = true
+    self._root.Visible = true
+    local b = self:_makeBadge(char, holdDur)
+    table.insert(self._badges, b)
+end
 
-    local badge = makeFrame({
-        Name             = "OBadge_".. #self._keys,
-        BackgroundColor3 = THEME.ind_key_bg,
-        Size             = UDim2.new(0, 36, 0, 36),
-        ZIndex           = 31,
-    }, self._root)
-    addCorner(8, badge)
-    addStroke(THEME.gold_dim, 1, badge)
-
-    makeLabel({
-        Size       = UDim2.new(1, 0, 1, 0),
-        Text       = char,
-        TextColor3 = THEME.gold,
-        Font       = Enum.Font.Code,
-        TextSize   = 16,
-        ZIndex     = 32,
-    }, badge)
-
-    table.insert(self._badges, badge)
+-- Returns true if the most recently pushed badge has been held long enough
+function OrbitIndicator:lastKeyReady()
+    local b = self._badges[#self._badges]
+    if not b then return true end
+    return b.done
 end
 
 function OrbitIndicator:startCharge(duration)
@@ -414,29 +513,81 @@ function OrbitIndicator:startCharge(duration)
     self._chargeStart = tick()
     self._chargeDur   = duration or HOLD_TIME
     self._charge      = 0
-    -- Brighten last badge stroke
-    if #self._badges > 0 then
-        addStroke(THEME.ind_charge, 2, self._badges[#self._badges])
-    end
 end
 
-function OrbitIndicator:reset(instant)
+-- Fail animation: badges explode outward with red flash then fade
+function OrbitIndicator:fail()
+    if self._dying then return end
+    self._dying    = true
+    self._charging = false
+
+    local mouse  = UserInputService:GetMouseLocation()
+    local n      = #self._badges
+
+    for i, b in ipairs(self._badges) do
+        -- Snapshot current position
+        local angle = self._angle + (i - 1) * (2 * math.pi / math.max(n, 1))
+        local radius = 46 + n * 5
+        local ox = math.cos(angle) * radius
+        local oy = math.sin(angle) * radius
+        local startX = mouse.X + ox - 19
+        local startY = mouse.Y + oy - 19
+
+        -- Drift outward direction
+        local driftX = startX + ox * 1.4 + (math.random() - 0.5) * 30
+        local driftY = startY + oy * 1.4 + (math.random() - 0.5) * 30 + 20
+
+        -- Red flash
+        b.frame.BackgroundColor3 = THEME.red
+        b.fill.BackgroundColor3  = THEME.red_bright
+        b.stroke.Color           = THEME.red_bright
+        b.glow.BackgroundColor3  = THEME.red
+        b.label.TextColor3       = Color3.new(1, 1, 1)
+        b.glow.BackgroundTransparency = 0.3
+
+        -- Drift tween
+        TweenService:Create(b.frame, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Position               = UDim2.new(0, driftX, 0, driftY),
+            BackgroundTransparency = 1,
+        }):Play()
+        TweenService:Create(b.label, TweenInfo.new(0.55), {
+            TextTransparency = 1,
+        }):Play()
+        TweenService:Create(b.glow, TweenInfo.new(0.4), {
+            BackgroundTransparency = 1,
+        }):Play()
+        TweenService:Create(b.stroke, TweenInfo.new(0.4), {
+            Transparency = 1,
+        }):Play()
+    end
+
+    -- Clean up after animation
+    task.delay(0.6, function()
+        self:_hardReset()
+    end)
+end
+
+function OrbitIndicator:_hardReset()
+    self._dying    = false
     self._charging = false
     self._charge   = 0
     self._keys     = {}
-    for _, b in ipairs(self._badges) do b:Destroy() end
-    self._badges = {}
-
-    if instant then
-        self._root.Visible = false
-        self._visible      = false
-    else
-        -- Fade out over 0.25s then hide
-        task.delay(0.25, function()
-            self._root.Visible = false
-            self._visible      = false
-        end)
+    for _, b in ipairs(self._badges) do
+        if b.frame and b.frame.Parent then b.frame:Destroy() end
     end
+    self._badges       = {}
+    self._root.Visible = false
+    self._visible      = false
+end
+
+-- Clean success reset (instant, no animation — cast log takes over)
+function OrbitIndicator:resetSuccess()
+    self:_hardReset()
+end
+
+-- Silent reset (no animation, e.g. exiting cast mode)
+function OrbitIndicator:resetSilent()
+    self:_hardReset()
 end
 
 function OrbitIndicator:destroy()
@@ -453,12 +604,12 @@ local function showCastLog(screenGui, lines)
     local w      = 320
 
     local root = makeFrame({
-        Name             = "CastLog",
-        BackgroundColor3 = THEME.ind_bg,
-        Size             = UDim2.new(0, w, 0, totalH),
-        Position         = UDim2.new(0.5, -w / 2, 0, 120),
+        Name                   = "CastLog",
+        BackgroundColor3       = THEME.ind_bg,
+        Size                   = UDim2.new(0, w, 0, totalH),
+        Position               = UDim2.new(0.5, -w / 2, 0, 120),
         BackgroundTransparency = 1,
-        ZIndex = 25,
+        ZIndex                 = 25,
     }, screenGui)
     addCorner(8, root)
     addStroke(THEME.ind_border, 1, root)
@@ -491,6 +642,15 @@ end
 -- ─────────────────────────────────────────────────────────────
 --  CASTING ENGINE
 -- ─────────────────────────────────────────────────────────────
+--
+-- Chord system:
+--   1. Player presses key N — starts hold timer
+--   2. After keyHoldTime, key is "charged" and next key may be added
+--   3. All previously held keys must remain held throughout
+--   4. Once full sequence is charged simultaneously, HOLD_TIME fires cast
+--   5. Releasing ANY tracked key at ANY point = fail()
+--   6. Idle IDLE_RESET seconds with no keys held = silent reset
+-- ─────────────────────────────────────────────────────────────
 
 local CastingEngine = {}
 CastingEngine.__index = CastingEngine
@@ -498,21 +658,23 @@ CastingEngine.__index = CastingEngine
 function CastingEngine.new(screenGui, indicator)
     local self           = setmetatable({}, CastingEngine)
     self._screenGui      = screenGui
-    self._indicator      = indicator  -- OrbitIndicator
+    self._indicator      = indicator
     self._books          = {}
     self._castMode       = false
-    self._pressOrder     = {}
-    self._pressedSet     = {}
-    self._lastPressTime  = 0
-    self._holdThread     = nil
+    self._pressOrder     = {}      -- ordered chars pressed so far
+    self._pressedSet     = {}      -- set of currently held chars
+    self._holdThread     = nil     -- final cast hold thread
+    self._idleThread     = nil     -- idle reset thread
     self._connections    = {}
-    self._castModeKey    = Enum.KeyCode.Tilde
-    self._modeLabel      = nil  -- set externally after UI build
+    self._castModeKey    = Enum.KeyCode.BackQuote
+    self._modeLabel      = nil
+    self._awaitingNext   = false   -- true when waiting for current key to charge
+    self._currentSpell   = nil     -- spell being tracked (nil = open input)
     return self
 end
 
-function CastingEngine:setBooks(books)    self._books = books end
-function CastingEngine:setCastModeKey(kc) self._castModeKey = kc end
+function CastingEngine:setBooks(books)     self._books = books end
+function CastingEngine:setCastModeKey(kc)  self._castModeKey = kc end
 
 function CastingEngine:_allSpells()
     local all = {}
@@ -526,84 +688,214 @@ end
 
 function CastingEngine:_findSpell(seq)
     for _, spell in ipairs(self:_allSpells()) do
-        if spell:getSequence() == seq then
+        if spell:getSequence() == seq then return spell end
+    end
+    return nil
+end
+
+-- Find a spell whose sequence STARTS WITH seq (for partial matching)
+function CastingEngine:_findPartialSpell(seq)
+    for _, spell in ipairs(self:_allSpells()) do
+        if spell:getSequence():sub(1, #seq) == seq then
             return spell
         end
     end
     return nil
 end
 
-function CastingEngine:_reset()
-    self._pressOrder   = {}
-    self._pressedSet   = {}
-    self._lastPressTime = 0
+-- ── Fail: show animation + optional log message ────────────────
+function CastingEngine:_fail(reason)
+    -- Cancel any pending hold
     if self._holdThread then
         task.cancel(self._holdThread)
         self._holdThread = nil
     end
-    self._indicator:reset(false)
-end
-
-function CastingEngine:_enterCastMode()
-    self._castMode = true
-    self:_reset()
-    if self._modeLabel then
-        self._modeLabel.Text      = "◆ CASTING"
-        self._modeLabel.TextColor3 = THEME.gold
-        self._modeLabel.Visible    = true
-    end
-end
-
-function CastingEngine:_exitCastMode()
-    self._castMode = false
-    self:_reset()
-    if self._modeLabel then
-        self._modeLabel.Visible = false
-    end
-end
-
-function CastingEngine:_onKeyAdded()
-    local current = table.concat(self._pressOrder)
-    local n       = #current
-
-    -- Check for exact match → start hold countdown
-    local exactSpell = self:_findSpell(current)
-    if exactSpell then
-        self:_startHold(exactSpell, current)
-        return
+    if self._idleThread then
+        task.cancel(self._idleThread)
+        self._idleThread = nil
     end
 
-    -- Otherwise just continue collecting (indicator already updated by pushKey)
-    -- Timeout check happens in onKeyDown
+    -- Indicator fail animation
+    self._indicator:fail()
+
+    -- Show log only if there's a meaningful reason (not silent idle reset)
+    if reason then
+        showCastLog(self._screenGui, {
+            { text = reason,                    color = THEME.red   },
+            { text = randomFrom(SPELL_ERRORS),  color = THEME.ink_dim },
+        })
+    end
+
+    -- Reset engine state (indicator handles its own cleanup after animation)
+    self._pressOrder   = {}
+    self._pressedSet   = {}
+    self._awaitingNext = false
+    self._currentSpell = nil
 end
 
-function CastingEngine:_startHold(spell, seq)
-    if self._holdThread then task.cancel(self._holdThread) end
-    self._indicator:startCharge(HOLD_TIME)
-    self._holdThread = task.delay(HOLD_TIME, function()
-        -- Verify sequence still intact
-        local current = table.concat(self._pressOrder)
-        if current ~= seq then
-            self:_reset()
-            return
+-- ── Silent reset (exit cast mode, no animation) ───────────────
+function CastingEngine:_silentReset()
+    if self._holdThread then task.cancel(self._holdThread); self._holdThread = nil end
+    if self._idleThread then task.cancel(self._idleThread); self._idleThread = nil end
+    self._pressOrder   = {}
+    self._pressedSet   = {}
+    self._awaitingNext = false
+    self._currentSpell = nil
+    self._indicator:resetSilent()
+end
+
+-- ── Idle reset: no keys held for IDLE_RESET seconds ───────────
+function CastingEngine:_scheduleIdleReset()
+    if self._idleThread then task.cancel(self._idleThread) end
+    self._idleThread = task.delay(IDLE_RESET, function()
+        -- Only fire if still no keys held
+        if #self._pressOrder == 0 or next(self._pressedSet) == nil then
+            self:_silentReset()
         end
-        self:_cast(spell)
-        self:_reset()
+        self._idleThread = nil
     end)
 end
 
-function CastingEngine:_cast(spell)
-    -- Cooldown check
-    if spell:isCoolingDown() then
-        local rem = math.ceil(spell:cooldownRemaining())
-        showCastLog(self._screenGui, {
-            { text = "On cooldown — ".. spell.name, color = THEME.orange },
-            { text = rem .. "s remaining",          color = THEME.ink_dim },
-        })
+-- ── Key pressed ───────────────────────────────────────────────
+function CastingEngine:onKeyDown(key)
+    if key == self._castModeKey then
+        if self._castMode then self:_exitCastMode() else self:_enterCastMode() end
         return
     end
 
-    local msg = randomFrom(CAST_MESSAGES)
+    if not self._castMode then return end
+
+    if key == Enum.KeyCode.Escape then
+        self:_exitCastMode()
+        return
+    end
+
+    local char = CAST_KEY_MAP[key]
+    if not char then return end
+
+    -- Already tracking this key? ignore repeat
+    if self._pressedSet[char] then return end
+
+    -- If we're still waiting for the last key to charge, block new input
+    if self._awaitingNext then return end
+
+    -- Mark as pressed
+    self._pressedSet[char] = true
+
+    -- Cancel idle reset since a key is now held
+    if self._idleThread then task.cancel(self._idleThread); self._idleThread = nil end
+
+    -- Determine keyHoldTime from current spell if we have one partially matched
+    local keyHoldTime = KEY_HOLD_TIME
+    local seq = table.concat(self._pressOrder) .. char
+    local partialSpell = self:_findPartialSpell(seq)
+    if partialSpell then
+        keyHoldTime = partialSpell.keyHoldTime or KEY_HOLD_TIME
+    end
+
+    -- Push badge, then start waiting
+    self._awaitingNext = true
+    self._indicator:pushKey(char, keyHoldTime)
+
+    -- Wait for keyHoldTime, then allow next key
+    task.delay(keyHoldTime, function()
+        -- Verify key is still held
+        if not self._pressedSet[char] then
+            -- Already released — fail was triggered by onKeyUp
+            return
+        end
+        -- Advance sequence
+        table.insert(self._pressOrder, char)
+        self._awaitingNext = false
+        self:_onKeyCharged(char)
+    end)
+end
+
+-- ── Called once a key has been held long enough ───────────────
+function CastingEngine:_onKeyCharged(char)
+    local current = table.concat(self._pressOrder)
+
+    -- Exact match: start final hold
+    local exactSpell = self:_findSpell(current)
+    if exactSpell then
+        self._currentSpell = exactSpell
+        self:_startFinalHold(exactSpell, current)
+        return
+    end
+
+    -- Partial match: continue waiting for more keys
+    local partial = self:_findPartialSpell(current)
+    if not partial then
+        -- Dead end — no spell matches this prefix
+        self:_fail("No spell matches this sequence.")
+    end
+    -- else: waiting for next key press
+end
+
+-- ── Final hold: all keys held, hold HOLD_TIME to cast ─────────
+function CastingEngine:_startFinalHold(spell, seq)
+    if self._holdThread then task.cancel(self._holdThread) end
+    self._indicator:startCharge(HOLD_TIME)
+    self._holdThread = task.delay(HOLD_TIME, function()
+        -- Verify full sequence still held
+        for i = 1, #seq do
+            if not self._pressedSet[seq:sub(i, i)] then
+                self:_fail("Grip broke at the last moment…")
+                return
+            end
+        end
+        self:_cast(spell)
+    end)
+end
+
+-- ── Key released ─────────────────────────────────────────────
+function CastingEngine:onKeyUp(key)
+    if not self._castMode then return end
+    local char = CAST_KEY_MAP[key]
+    if not char then return end
+
+    if not self._pressedSet[char] then return end
+    self._pressedSet[char] = nil
+
+    -- If this key was part of our active sequence (or pending), it's a fail
+    local isTracked = false
+    for _, c in ipairs(self._pressOrder) do
+        if c == char then isTracked = true; break end
+    end
+    -- Also tracked if we pushed it but it hasn't charged yet (awaitingNext)
+    -- In that case _pressOrder doesn't have it yet but _pressedSet did
+    if isTracked or self._awaitingNext then
+        self:_fail("Sequence broken.")
+        self._awaitingNext = false
+        self._pressOrder   = {}
+        self._currentSpell = nil
+        return
+    end
+
+    -- If all tracked keys are now released, schedule idle reset
+    if next(self._pressedSet) == nil then
+        self:_scheduleIdleReset()
+    end
+end
+
+-- ── Cast ─────────────────────────────────────────────────────
+function CastingEngine:_cast(spell)
+    -- Cooldown check — counts as a fail with specific message
+    if spell:isCoolingDown() then
+        local rem = math.ceil(spell:cooldownRemaining())
+        self._indicator:fail()
+        showCastLog(self._screenGui, {
+            { text = "On cooldown — " .. spell.name, color = THEME.orange  },
+            { text = rem .. "s remaining",           color = THEME.ink_dim },
+        })
+        self._pressOrder   = {}
+        self._pressedSet   = {}
+        self._awaitingNext = false
+        self._currentSpell = nil
+        return
+    end
+
+    local msg     = randomFrom(CAST_MESSAGES)
     local success, err = pcall(spell.callback)
     spell:onCast()
 
@@ -613,67 +905,45 @@ function CastingEngine:_cast(spell)
     if success then
         table.insert(lines, { text = "The magic takes hold.", color = THEME.ink })
     else
-        table.insert(lines, { text = randomFrom(SPELL_ERRORS), color = THEME.red })
+        table.insert(lines, { text = randomFrom(SPELL_ERRORS),     color = THEME.red })
         if err then
             table.insert(lines, { text = tostring(err):sub(1, 60), color = THEME.red })
         end
     end
-
     if spell.cooldown > 0 then
         table.insert(lines, { text = "Cooldown: " .. spell.cooldown .. "s", color = THEME.ink_dim })
     end
 
     showCastLog(self._screenGui, lines)
+    self._indicator:resetSuccess()
+
+    self._holdThread   = nil
+    self._pressOrder   = {}
+    self._pressedSet   = {}
+    self._awaitingNext = false
+    self._currentSpell = nil
 end
 
-function CastingEngine:onKeyDown(key)
-    -- Cast mode toggle key
-    if key == self._castModeKey then
-        if self._castMode then
-            self:_exitCastMode()
-        else
-            self:_enterCastMode()
-        end
-        return
-    end
-
-    if not self._castMode then return end
-
-    -- Escape exits cast mode
-    if key == Enum.KeyCode.Escape then
-        self:_exitCastMode()
-        return
-    end
-
-    local char = CAST_KEY_MAP[key]
-    if not char then return end
-
-    local now = tick()
-    if #self._pressOrder > 0 and (now - self._lastPressTime) > TIMEOUT then
-        self:_reset()
-    end
-    self._lastPressTime = now
-
-    if self._pressedSet[char] then return end
-    self._pressedSet[char] = true
-    table.insert(self._pressOrder, char)
-    self._indicator:pushKey(char)
-    self:_onKeyAdded()
-end
-
-function CastingEngine:onKeyUp(key)
-    if not self._castMode then return end
-    local char = CAST_KEY_MAP[key]
-    if char and self._pressedSet[char] then
-        -- Release cancels hold
-        if self._holdThread then
-            task.cancel(self._holdThread)
-            self._holdThread = nil
-            self:_reset()
-        end
+-- ── Cast mode enter/exit ──────────────────────────────────────
+function CastingEngine:_enterCastMode()
+    self._castMode = true
+    self:_silentReset()
+    if self._modeLabel then
+        self._modeLabel.Text       = "◆ CASTING"
+        self._modeLabel.TextColor3 = THEME.gold
+        self._modeLabel.Visible    = true
     end
 end
 
+function CastingEngine:_exitCastMode()
+    self._castMode = false
+    self:_silentReset()
+    if self._modeLabel then
+        self._modeLabel.Visible = false
+    end
+end
+
+-- ── Input listeners ───────────────────────────────────────────
 function CastingEngine:startListening()
     local c1 = UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
@@ -757,13 +1027,12 @@ function SpellbookUI:_buildGui()
     }, PlayerGui)
     self._screenGui = sg
 
-    -- Orbit indicator + engine
     self._indicator = OrbitIndicator.new(sg)
     self._engine    = CastingEngine.new(sg, self._indicator)
     self._engine:setBooks(self._lib._books)
     self._engine:startListening()
 
-    -- Cast mode label (top-center, always visible when casting)
+    -- Cast mode badge (top-center)
     self._modeLabel = makeLabel({
         Name           = "CastModeLabel",
         Size           = UDim2.new(0, 120, 0, 22),
@@ -785,7 +1054,6 @@ function SpellbookUI:_buildGui()
     addCorner(5, mlBg)
     addStroke(THEME.gold_dim, 1, mlBg)
     self._modeLabel.BackgroundTransparency = 1
-
     self._engine._modeLabel = self._modeLabel
 
     -- Main window
@@ -810,7 +1078,6 @@ end
 
 function SpellbookUI:_buildTitlebar(win)
     local bar = makeFrame({
-        Name             = "TitleBar",
         BackgroundColor3 = THEME.spine,
         Size             = UDim2.new(1, 0, 0, 36),
         ZIndex           = 11,
@@ -828,7 +1095,6 @@ function SpellbookUI:_buildTitlebar(win)
         ZIndex         = 12,
     }, bar)
 
-    -- Close button
     local closeBtn = makeButton({
         BackgroundColor3 = THEME.spine,
         TextColor3       = THEME.red,
@@ -836,13 +1102,12 @@ function SpellbookUI:_buildTitlebar(win)
         TextSize         = 11,
         Size             = UDim2.new(0, 32, 0, 22),
         Position         = UDim2.new(1, -38, 0.5, -11),
-        Text             = "[×]",
+        Text             = "[x]",
         ZIndex           = 12,
     }, bar)
     addCorner(4, closeBtn)
     closeBtn.MouseButton1Click:Connect(function() self:close() end)
 
-    -- Books cycle button
     local booksBtn = makeButton({
         BackgroundColor3 = THEME.spine,
         TextColor3       = THEME.ink_dim,
@@ -857,10 +1122,9 @@ function SpellbookUI:_buildTitlebar(win)
     booksBtn.MouseButton1Click:Connect(function() self:_cycleBook() end)
     self._booksBtn = booksBtn
 
-    -- Drag
     bar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            self._dragging  = true
+            self._dragging   = true
             self._dragOffset = Vector2.new(
                 input.Position.X - self._window.AbsolutePosition.X,
                 input.Position.Y - self._window.AbsolutePosition.Y
@@ -919,7 +1183,6 @@ end
 function SpellbookUI:_buildPageContent(c)
     local pad = 22
 
-    -- ── Header row: page counter + book name ──
     local hdr = makeFrame({
         BackgroundTransparency = 1,
         Size     = UDim2.new(1, -pad*2, 0, 20),
@@ -948,7 +1211,6 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex         = 12,
     }, hdr)
 
-    -- ── Spell name ──
     self._nameLabel = makeLabel({
         Size           = UDim2.new(1, -pad*2, 0, 32),
         Position       = UDim2.new(0, pad, 0, 36),
@@ -960,7 +1222,6 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex         = 12,
     }, c)
 
-    -- ── Thin divider ──
     makeFrame({
         BackgroundColor3 = THEME.gold_dim,
         Size             = UDim2.new(1, -pad*2, 0, 1),
@@ -968,7 +1229,6 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex           = 12,
     }, c)
 
-    -- ── Sequence section ──
     makeLabel({
         Size           = UDim2.new(1, -pad*2, 0, 16),
         Position       = UDim2.new(0, pad, 0, 82),
@@ -987,7 +1247,6 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex   = 12,
     }, c)
 
-    -- ── Spell info block ──
     local infoHolder = makeFrame({
         BackgroundColor3 = THEME.spine,
         Size             = UDim2.new(1, -pad*2, 0, 130),
@@ -998,20 +1257,19 @@ function SpellbookUI:_buildPageContent(c)
     addStroke(THEME.page_border, 1, infoHolder)
 
     self._infoLabel = makeLabel({
-        Size             = UDim2.new(1, -16, 1, -12),
-        Position         = UDim2.new(0, 8, 0, 6),
-        Text             = "",
-        TextColor3       = THEME.ink,
-        Font             = Enum.Font.Code,
-        TextSize         = 12,
-        TextXAlignment   = Enum.TextXAlignment.Left,
-        TextYAlignment   = Enum.TextYAlignment.Top,
-        TextWrapped      = true,
-        RichText         = true,
-        ZIndex           = 13,
+        Size           = UDim2.new(1, -16, 1, -12),
+        Position       = UDim2.new(0, 8, 0, 6),
+        Text           = "",
+        TextColor3     = THEME.ink,
+        Font           = Enum.Font.Code,
+        TextSize       = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped    = true,
+        RichText       = true,
+        ZIndex         = 13,
     }, infoHolder)
 
-    -- ── Cooldown bar ──
     makeLabel({
         Size           = UDim2.new(1, -pad*2, 0, 14),
         Position       = UDim2.new(0, pad, 0, 290),
@@ -1049,12 +1307,11 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex         = 14,
     }, self._cdHolder)
 
-    -- ── Cast button + status ──
     local castBtn = makeButton({
         Size             = UDim2.new(0, 120, 0, 32),
         Position         = UDim2.new(0, pad, 0, 344),
         BackgroundColor3 = THEME.gold_dim,
-        Text             = "▶  Cast Now",
+        Text             = "> Cast Now",
         TextColor3       = THEME.bg,
         Font             = Enum.Font.GothamBold,
         TextSize         = 13,
@@ -1081,7 +1338,6 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex         = 12,
     }, c)
 
-    -- Cooldown update loop
     RunService.Heartbeat:Connect(function()
         self:_tickCooldownBar()
     end)
@@ -1100,7 +1356,7 @@ function SpellbookUI:_tickCooldownBar()
         return
     end
 
-    local rem = spell:cooldownRemaining()
+    local rem  = spell:cooldownRemaining()
     local frac = 1 - (rem / spell.cooldown)
     TweenService:Create(self._cdBar, TweenInfo.new(0.1), {
         Size = UDim2.new(frac, 0, 1, 0)
@@ -1140,12 +1396,11 @@ function SpellbookUI:_buildBottomBar(win)
         return b
     end
 
-    self._prevBtn = navBtn("◀", 6,  function() self:_prevPage() end)
-    self._nextBtn = navBtn("▶", 36, function() self:_nextPage() end)
-    navBtn("↑", 72,  function() self:_reorder(-1) end)
-    navBtn("↓", 102, function() self:_reorder(1)  end)
+    self._prevBtn = navBtn("<", 6,   function() self:_prevPage() end)
+    self._nextBtn = navBtn(">", 36,  function() self:_nextPage() end)
+    navBtn("^", 72,  function() self:_reorder(-1) end)
+    navBtn("v", 102, function() self:_reorder(1)  end)
 
-    -- Cast mode hint
     makeLabel({
         Size           = UDim2.new(0, 200, 1, 0),
         Position       = UDim2.new(1, -206, 0, 0),
@@ -1165,7 +1420,7 @@ function SpellbookUI:_currentBookF()
 end
 
 function SpellbookUI:_renderPage()
-    local book   = self:_currentBookF()
+    local book = self:_currentBookF()
     if not book then return end
     local spells = book.spells
     local total  = math.max(#spells, 1)
@@ -1179,22 +1434,23 @@ function SpellbookUI:_renderPage()
     self._bookLabel.Text     = book.name
 
     if #spells == 0 then
-        self._nameLabel.Text  = "Empty Grimoire"
-        self._infoLabel.Text  = "No spells.\nUse :addSpell() to add one."
+        self._nameLabel.Text = "Empty Grimoire"
+        self._infoLabel.Text = "No spells.\nUse :addSpell() to add one."
         self:_clearSeq()
-        self._cdLabel.Text    = "None"
+        self._cdLabel.Text = "None"
         return
     end
 
     local spell = spells[idx]
     self._nameLabel.Text = spell.name
 
-    -- Info block
     local seqStr = spell:getSequence()
     self._infoLabel.Text =
         "<font color='#6060a0'>sequence</font>   " .. seqStr
-        .. "\n<font color='#6060a0'>hold final key</font>  " .. HOLD_TIME .. "s to cast"
-        .. "\n<font color='#6060a0'>cooldown</font>   " .. (spell.cooldown > 0 and spell.cooldown .. "s" or "none")
+        .. "\n<font color='#6060a0'>key hold</font>    " .. spell.keyHoldTime .. "s per key"
+        .. "\n<font color='#6060a0'>final hold</font>  " .. HOLD_TIME .. "s to cast"
+        .. "\n<font color='#6060a0'>cooldown</font>   "
+        .. (spell.cooldown > 0 and spell.cooldown .. "s" or "none")
 
     self._statusLabel.Text = ""
     self:_rebuildSeq(seqStr)
@@ -1208,8 +1464,6 @@ function SpellbookUI:_rebuildSeq(seq)
     self:_clearSeq()
     buildSeqRow(self._seqHolder, seq)
 end
-
--- ── Navigation ─────────────────────────────────────────────────
 
 function SpellbookUI:_prevPage()
     local book = self:_currentBookF()
@@ -1232,8 +1486,6 @@ function SpellbookUI:_reorder(dir)
     self:_renderPage()
 end
 
--- ── Cast current ───────────────────────────────────────────────
-
 function SpellbookUI:_castCurrent()
     local book = self:_currentBookF()
     if not book or #book.spells == 0 then return end
@@ -1247,8 +1499,6 @@ function SpellbookUI:_castCurrent()
     self._engine:_cast(spell)
 end
 
--- ── Book cycle ─────────────────────────────────────────────────
-
 function SpellbookUI:_cycleBook()
     local books = self._lib._books
     if #books <= 1 then
@@ -1260,12 +1510,10 @@ function SpellbookUI:_cycleBook()
     self._currentBook = (self._currentBook % #books) + 1
     self._currentPage = 1
     self:_renderPage()
-    self._statusLabel.Text       = "→ " .. books[self._currentBook].name
+    self._statusLabel.Text       = "> " .. books[self._currentBook].name
     self._statusLabel.TextColor3 = THEME.green
     task.delay(2, function() if self._statusLabel then self._statusLabel.Text = "" end end)
 end
-
--- ── Toggle ─────────────────────────────────────────────────────
 
 function SpellbookUI:open()
     self._open = true
@@ -1305,22 +1553,22 @@ SpellbookLib.__index = SpellbookLib
 
 --[[
     SpellbookLib.new(config?)
-    
+
     config:
-        toggleKey     Enum.KeyCode  window toggle key     (default: RightBracket)
-        castModeKey   Enum.KeyCode  enter/exit cast mode  (default: BackQuote `)
-        autoOpen      bool          open immediately       (default: false)
+        toggleKey     Enum.KeyCode   window toggle          (default: RightBracket)
+        castModeKey   Enum.KeyCode   enter/exit cast mode   (default: BackQuote `)
+        autoOpen      bool           open immediately       (default: false)
 ]]
 function SpellbookLib.new(config)
     local self = setmetatable({}, SpellbookLib)
     config = config or {}
 
-    self._books          = {}
-    self._ui             = nil
-    self._usedSequences  = {}   -- global dedup table
+    self._books         = {}
+    self._ui            = nil
+    self._usedSequences = {}
 
     local toggleKey   = config.toggleKey   or Enum.KeyCode.RightBracket
-    local castModeKey = config.castModeKey or Enum.KeyCode.Tilde
+    local castModeKey = config.castModeKey or Enum.KeyCode.BackQuote
     local autoOpen    = config.autoOpen    or false
 
     task.defer(function()
@@ -1330,9 +1578,7 @@ function SpellbookLib.new(config)
 
         UserInputService.InputBegan:Connect(function(input, gp)
             if gp then return end
-            if input.KeyCode == toggleKey then
-                self._ui:toggle()
-            end
+            if input.KeyCode == toggleKey then self._ui:toggle() end
         end)
     end)
 
@@ -1341,46 +1587,12 @@ end
 
 --[[
     lib:addBook(name) → Book
+    Returns a book whose addSpell guarantees globally unique sequences.
 ]]
-function SpellbookLib:addBook(name)
-    local book = Book.new(name)
-    table.insert(self._books, book)
-    if self._ui then self._ui._engine:setBooks(self._books) end
-    return book
-end
-
---[[
-    book:addSpell(name, callback, opts?)
-    opts: { cooldown = number }
-    
-    Sequences are guaranteed unique across ALL books.
-]]
-local _origAddSpell = Book.addSpell
-function Book:addSpell(name, callback, opts)
-    local spell = Spell.new(name, callback, opts)
-    -- sequence assigned by lib when registered; if called directly, generate without dedup
-    if not spell._sequence then
-        spell._sequence = generateSequence(name, tostring(name), {})
-    end
-    table.insert(self.spells, spell)
-    return spell
-end
-
--- Override when added via lib so we can guarantee global uniqueness
-function SpellbookLib:addSpellToBook(book, name, callback, opts)
-    local spell = Spell.new(name, callback, opts)
-    spell._sequence = generateSequence(name, tostring(#self._usedSequences), self._usedSequences)
-    table.insert(book.spells, spell)
-    if self._ui then self._ui._engine:setBooks(self._books) end
-    return spell
-end
-
--- Convenience: addBook returns a book whose addSpell is dedup-aware
 function SpellbookLib:addBook(name)
     local lib  = self
     local book = Book.new(name)
 
-    -- Wrap addSpell to use lib's dedup table
     book.addSpell = function(bk, spellName, callback, opts)
         local spell = Spell.new(spellName, callback, opts)
         spell._sequence = generateSequence(
@@ -1398,16 +1610,14 @@ function SpellbookLib:addBook(name)
     return book
 end
 
-function SpellbookLib:open()    if self._ui then self._ui:open()   end end
-function SpellbookLib:close()   if self._ui then self._ui:close()  end end
-function SpellbookLib:toggle()  if self._ui then self._ui:toggle() end end
+function SpellbookLib:open()   if self._ui then self._ui:open()   end end
+function SpellbookLib:close()  if self._ui then self._ui:close()  end end
+function SpellbookLib:toggle() if self._ui then self._ui:toggle() end end
 
 function SpellbookLib:destroy()
     if self._ui then self._ui:destroy() end
-    self._books = {}
+    self._books         = {}
     self._usedSequences = {}
 end
-
--- ─────────────────────────────────────────────────────────────
 
 return SpellbookLib
