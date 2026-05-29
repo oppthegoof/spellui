@@ -1600,7 +1600,7 @@ function SpellbookLib:addBook(name)
         local spell = Spell.new(spellName, callback, opts)
         spell._sequence = generateSequence(
             spellName,
-            tostring(#lib._usedSequences + math.random(1, 9999)),
+            spellName,
             lib._usedSequences
         )
         table.insert(bk.spells, spell)
