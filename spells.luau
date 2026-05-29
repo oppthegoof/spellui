@@ -506,7 +506,7 @@ function CastingEngine.new(screenGui, indicator)
     self._lastPressTime  = 0
     self._holdThread     = nil
     self._connections    = {}
-    self._castModeKey    = Enum.KeyCode.BackQuote
+    self._castModeKey    = Enum.KeyCode.Tilde
     self._modeLabel      = nil  -- set externally after UI build
     return self
 end
