@@ -666,7 +666,7 @@ function CastingEngine.new(screenGui, indicator)
     self._holdThread     = nil     -- final cast hold thread
     self._idleThread     = nil     -- idle reset thread
     self._connections    = {}
-    self._castModeKey    = Enum.KeyCode.uote
+    self._castModeKey    = Enum.KeyCode.Tilde
     self._modeLabel      = nil
     self._awaitingNext   = false   -- true when waiting for current key to charge
     self._currentSpell   = nil     -- spell being tracked (nil = open input)
