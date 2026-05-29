@@ -1368,17 +1368,16 @@ function SpellbookUI:_renderPage()
 
     if #spells == 0 then
         self._nameBox.Text  = "Empty Grimoire"
-        self._codeLabel.Text = "-- No spells in this book.\n-- Use :addSpell() to add one."
+        self._codeLabel.Text = "No spells in this book.\n-- Use :addSpell() to add one."
         self:_clearSeqDisplay()
         return
     end
 
     local spell = spells[idx]
     self._nameBox.Text   = spell.name
-    self._codeLabel.Text = "-- Callback bound to: ".. spell.name
-                        .. "\n-- Sequence: ".. spell:getSequence()
-                        .. "\n-- Seed: ".. spell.seed
-                        .. "\n\n-- Hold the final key in the\n-- sequence for 1s to cast."
+    self._codeLabel.Text = " Spell incantation bound to: ".. spell.name
+                        .. "\n Sequence: ".. spell:getSequence()
+                        .. "\n\n Hold the final key in the\n sequence for 1s to cast."
     self._statusLabel.Text = ""
     self:_rebuildSeqDisplay(spell:getSequence())
 end
