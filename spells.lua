@@ -601,7 +601,7 @@ function CastingEngine:_reset(fade)
     self._lastPressTime = 0
     self._pendingSpell  = nil
     if self._holdThread then
-        --task.cancel(self._holdThread)
+        task.cancel(self._holdThread)
         self._holdThread = nil
     end
     self._indicator:hide(fade or false)
