@@ -813,16 +813,35 @@ function CastingEngine:onKeyDown(key)
     end)
 end
 
+-- helper
+local function isExtendable(self, seq)
+    for _, spell in ipairs(self:_allSpells()) do
+        local s = spell:getSequence()
+        if #s > #seq and s:sub(1, #seq) == seq then
+            return true
+        end
+    end
+    return false
+end
+
 -- ── Called once a key has been held long enough ───────────────
 function CastingEngine:_onKeyCharged(char)
     local current = table.concat(self._pressOrder)
 
     -- Exact match: start final hold
     local exactSpell = self:_findSpell(current)
+    
     if exactSpell then
-        self._currentSpell = exactSpell
-        self:_startFinalHold(exactSpell, current)
-        return
+        if isExtendable(self, current) then
+            -- WAIT instead of casting
+            self._currentSpell = exactSpell
+            return
+        else
+            -- safe to cast immediately
+            self._currentSpell = exactSpell
+            self:_startFinalHold(exactSpell, current)
+            return
+        end
     end
 
     -- Partial match: continue waiting for more keys
