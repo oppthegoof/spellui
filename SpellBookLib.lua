@@ -834,7 +834,7 @@ function CastingEngine:_onKeyCharged(char)
     if exactSpell then
         if isExtendable(self, current) then
             -- WAIT instead of casting
-            self._holdThread = task.delay(0.4, function()
+            task.delay(0.4, function()
                 if self._currentSpell and table.concat(self._pressOrder) == current then
                     self:_startFinalHold(self._currentSpell, current)
                 end
@@ -860,16 +860,33 @@ end
 
 -- ── Final hold: all keys held, hold HOLD_TIME to cast ─────────
 function CastingEngine:_startFinalHold(spell, seq)
-    if self._holdThread then task.cancel(self._holdThread) end
+    -- cancel previous safely
+    self._finalCharging = false
+    self._holdCancel = true
+
+    self._finalCharging = true
+    self._holdCancel = false
+
     self._indicator:startCharge(HOLD_TIME)
-    self._holdThread = task.delay(HOLD_TIME, function()
-        -- Verify full sequence still held
+
+    task.spawn(function()
+        local start = tick()
+
+        while tick() - start < HOLD_TIME do
+            if self._holdCancel then return end
+            task.wait()
+        end
+
+        self._finalCharging = false
+
+        -- Verify still holding keys
         for i = 1, #seq do
             if not self._pressedSet[seq:sub(i, i)] then
                 self:_fail("Grip broke at the last moment…")
                 return
             end
         end
+
         self:_cast(spell)
     end)
 end
