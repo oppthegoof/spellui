@@ -10,7 +10,7 @@
 ║    book:addSpell("Fireball", function() end)                 ║
 ║    book:addSpell("Blaze", function() end, {                  ║
 ║        cooldown    = 5,                                      ║
-║        keyHoldTime = 0.3,   -- seconds per key (optional)   ║
+║        keyHoldTime = 0.3,   -- seconds per key (optional)    ║
 ║    })                                                        ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  CASTING (new chord system):                                 ║
@@ -23,7 +23,7 @@
 ║    Escape / castModeKey again = exit casting mode            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  IN-BOOK CONTROLS:                                           ║
-║    ◀ / ▶ buttons      : Turn pages                           ║
+║    ◀ / ▶ buttons      : Turn pages                          ║
 ║    ↑ / ↓ buttons      : Reorder spell in book                ║
 ║    [books] button     : Cycle to next book                   ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -672,6 +672,9 @@ function CastingEngine.new(screenGui, indicator)
     self._modeLabel      = nil
     self._awaitingNext   = false   -- true when waiting for current key to charge
     self._currentSpell   = nil     -- spell being tracked (nil = open input)
+    self._finalCharging = false
+    self._chargingSeq   = nil
+    self._holdCancel    = false
     return self
 end
 
@@ -813,40 +816,16 @@ function CastingEngine:onKeyDown(key)
     end)
 end
 
--- helper
-local function isExtendable(self, seq)
-    for _, spell in ipairs(self:_allSpells()) do
-        local s = spell:getSequence()
-        if #s > #seq and s:sub(1, #seq) == seq then
-            return true
-        end
-    end
-    return false
-end
-
 -- ── Called once a key has been held long enough ───────────────
 function CastingEngine:_onKeyCharged(char)
     local current = table.concat(self._pressOrder)
 
     -- Exact match: start final hold
     local exactSpell = self:_findSpell(current)
-    
     if exactSpell then
-        if isExtendable(self, current) then
-            -- WAIT instead of casting
-            task.delay(1, function()
-                if self._currentSpell and table.concat(self._pressOrder) == current then
-                    self:_startFinalHold(self._currentSpell, current)
-                end
-            end)
-            self._currentSpell = exactSpell
-            return
-        else
-            -- safe to cast immediately
-            self._currentSpell = exactSpell
-            self:_startFinalHold(exactSpell, current)
-            return
-        end
+        self._currentSpell = exactSpell
+        self:_startFinalHold(exactSpell, current)
+        return
     end
 
     -- Partial match: continue waiting for more keys
@@ -860,12 +839,12 @@ end
 
 -- ── Final hold: all keys held, hold HOLD_TIME to cast ─────────
 function CastingEngine:_startFinalHold(spell, seq)
-    -- cancel previous safely
-    self._finalCharging = false
+    -- cancel any existing hold
     self._holdCancel = true
 
     self._finalCharging = true
-    self._holdCancel = false
+    self._chargingSeq   = seq
+    self._holdCancel    = false
 
     self._indicator:startCharge(HOLD_TIME)
 
@@ -879,7 +858,7 @@ function CastingEngine:_startFinalHold(spell, seq)
 
         self._finalCharging = false
 
-        -- Verify still holding keys
+        -- still holding original sequence?
         for i = 1, #seq do
             if not self._pressedSet[seq:sub(i, i)] then
                 self:_fail("Grip broke at the last moment…")
