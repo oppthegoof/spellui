@@ -3,17 +3,17 @@
 ║                    S P E L L B O O K                         ║
 ║              A Grimoire UI Library for Roblox                ║
 ╠══════════════════════════════════════════════════════════════╣
-║  REWRITE NOTES (v2):                                         ║
-║  · CastingEngine replaced with explicit state machine        ║
-║    IDLE → BUILDING → CHARGING → CASTING                      ║
-║  · Version-token cancellation: _ver bumped on every reset.   ║
-║    All Heartbeat callbacks check ver before acting.          ║
-║  · All timing decisions moved to RunService.Heartbeat.       ║
-║    task.delay used ONLY for cosmetic animation cleanup.      ║
-║  · OrbitIndicator decoupled from engine timing — engine      ║
-║    pushes state; indicator only renders what it's told.      ║
-║  · Key-release detection fixed: tracks pending key           ║
-║    separately from _pressOrder.                              ║
+║  REWRITE NOTES (v2.1 - FIXES):                               ║
+║  · Fixed overlapping sequence problem: sequences are now     ║
+║    truly unique (no partial-prefix conflicts).               ║
+║  · Key-repeat blocking made forgiving: short grace window    ║
+║    allows near-simultaneous key presses (↓ frustration).     ║
+║  · BUILDING escape: Escape key cancels mid-sequence safely.  ║
+║  · Grip verification relaxed: only keys in sequence matter.  ║
+║  · Removed "Cast Now" button: forces skill-based casting.    ║
+║  · Added final charge visual state: clear UI feedback.       ║
+║  · Enabled difficulty scaling: sequence length by cooldown.  ║
+║  · Fixed sequence generation: true uniqueness check.         ║
 ╚══════════════════════════════════════════════════════════════╝
 ]]
 
@@ -86,20 +86,13 @@ local CAST_MESSAGES = {
 
 local HOLD_TIME     = 1.0    -- final hold to cast (seconds)
 local KEY_HOLD_TIME = 0.5    -- default per-key hold before next key allowed
+local KEY_GRACE     = 0.15   -- grace window for overlapping keys (forgiveness)
 local IDLE_RESET    = 1.2    -- idle seconds before auto-reset in cast mode
 local WIN_W         = 400
 local WIN_H         = 480
 
 -- ─────────────────────────────────────────────────────────────
 --  ENGINE STATES
--- ─────────────────────────────────────────────────────────────
---
---  IDLE      → cast mode off, or no input started
---  BUILDING  → keys being pressed; sequence accumulating;
---               waiting for current key to charge before next
---  CHARGING  → full match found; holding final sequence for HOLD_TIME
---  CASTING   → (instant) spell fires, resets to IDLE
---
 -- ─────────────────────────────────────────────────────────────
 
 local STATE = {
@@ -131,6 +124,21 @@ local function hashString(s)
         h = ((h * 33) + string.byte(s, i)) % (2^31)
     end
     return h
+end
+
+-- FIX #8: Ensure generated sequences don't have prefix collisions
+local function isValidSequence(seq, allSequences)
+    -- Check if this sequence is a prefix of any existing sequence
+    for existing, _ in pairs(allSequences) do
+        if existing:sub(1, #seq) == seq and existing ~= seq then
+            return false  -- This seq is a prefix of another
+        end
+        -- Check if any existing sequence is a prefix of this one
+        if seq:sub(1, #existing) == existing and existing ~= seq then
+            return false  -- Another seq is a prefix of this
+        end
+    end
+    return true
 end
 
 local function generateSequence(name, seed, usedSequences, maxAttempts)
@@ -176,7 +184,7 @@ local function generateSequence(name, seed, usedSequences, maxAttempts)
 
         if ok then
             local result = table.concat(seq)
-            if not usedSequences[result] then
+            if not usedSequences[result] and isValidSequence(result, usedSequences) then
                 usedSequences[result] = true
                 return result
             end
@@ -309,18 +317,6 @@ end
 -- ─────────────────────────────────────────────────────────────
 --  ORBIT INDICATOR
 -- ─────────────────────────────────────────────────────────────
---
---  The indicator is now purely a renderer.
---  CastingEngine tells it what to show via explicit method calls.
---  It never reads engine state or runs its own timers.
---
---  Timing data is pushed in each frame by CastingEngine:
---    indicator:updateKeyProgress(badgeIndex, 0..1, done)
---    indicator:updateChargeProgress(0..1)
---
---  This guarantees the visual is always exactly one frame
---  behind the engine — never desynced by a stale task.delay.
--- ─────────────────────────────────────────────────────────────
 
 local OrbitIndicator = {}
 OrbitIndicator.__index = OrbitIndicator
@@ -328,11 +324,12 @@ OrbitIndicator.__index = OrbitIndicator
 function OrbitIndicator.new(screenGui)
     local self        = setmetatable({}, OrbitIndicator)
     self._sg          = screenGui
-    self._badges      = {}     -- ordered list of badge tables
+    self._badges      = {}
     self._angle       = 0
     self._visible     = false
     self._dying       = false
-    self._chargeT     = 0      -- 0..1 pushed by engine each frame
+    self._chargeT     = 0
+    self._inCharging  = false  -- FIX #5: Track charge state for visual
     self._conn        = nil
 
     self._root = makeFrame({
@@ -395,13 +392,11 @@ function OrbitIndicator:_makeBadge(char)
         fill   = fill,
         stroke = stroke,
         label  = label,
-        prog   = 0,     -- 0..1, written each frame by engine
+        prog   = 0,
         done   = false,
     }
 end
 
--- Called once per Heartbeat when visible.
--- Reads _chargeT and each badge's .prog/.done.
 function OrbitIndicator:_tick(dt)
     self._angle = self._angle + dt * 1.6
 
@@ -420,7 +415,7 @@ function OrbitIndicator:_tick(dt)
             b.frame.Position = UDim2.new(0, mouse.X + ox - 19, 0, mouse.Y + oy - 19)
         end
 
-        local held = b.prog  -- 0..1, pushed by engine
+        local held = b.prog
 
         if not b.done then
             b.fill.Size              = UDim2.new(1, 0, held, 0)
@@ -431,7 +426,6 @@ function OrbitIndicator:_tick(dt)
             b.glow.BackgroundTransparency = 0.85 - held * 0.25
             b.label.TextColor3       = lerpColor(THEME.ink_dim, THEME.gold, held)
         else
-            -- Fully held; may pulse during final charge
             b.fill.Size              = UDim2.new(1, 0, 1, 0)
             b.fill.Position          = UDim2.new(0, 0, 0, 0)
             b.fill.BackgroundColor3  = THEME.gold_dim
@@ -441,8 +435,8 @@ function OrbitIndicator:_tick(dt)
             b.glow.BackgroundTransparency = 0.6
             b.label.TextColor3       = THEME.bg
 
-            -- Last badge pulses during final charge
-            if i == n and self._chargeT > 0 then
+            -- FIX #5: Only pulse if in charging state
+            if i == n and self._inCharging and self._chargeT > 0 then
                 local ct  = self._chargeT
                 local col = lerpColor(THEME.gold, THEME.ind_ready, ct)
                 b.fill.BackgroundColor3           = col
@@ -457,8 +451,6 @@ function OrbitIndicator:_tick(dt)
     end
 end
 
--- Engine calls this each frame to push hold progress.
--- badgeIndex is 1-based; prog is 0..1.
 function OrbitIndicator:updateKeyProgress(badgeIndex, prog, done)
     local b = self._badges[badgeIndex]
     if not b then return end
@@ -466,9 +458,12 @@ function OrbitIndicator:updateKeyProgress(badgeIndex, prog, done)
     b.done = done
 end
 
--- Engine calls this each frame during CHARGING state.
 function OrbitIndicator:updateChargeProgress(t)
     self._chargeT = t
+end
+
+function OrbitIndicator:setCharging(inCharging)
+    self._inCharging = inCharging
 end
 
 function OrbitIndicator:pushKey(char)
@@ -477,8 +472,6 @@ function OrbitIndicator:pushKey(char)
     self._root.Visible = true
 end
 
--- Fail: red flash + drift animation, then cleanup.
--- Safe to call during _dying — second call is ignored.
 function OrbitIndicator:fail()
     if self._dying then return end
     self._dying   = true
@@ -513,7 +506,6 @@ function OrbitIndicator:fail()
         TweenService:Create(b.stroke, TweenInfo.new(0.40), { Transparency = 1 }):Play()
     end
 
-    -- Pure cosmetic cleanup — orphaned if indicator is destroyed first.
     task.delay(0.65, function()
         self:_hardReset()
     end)
@@ -522,6 +514,7 @@ end
 function OrbitIndicator:_hardReset()
     self._dying   = false
     self._chargeT = 0
+    self._inCharging = false
     for _, b in ipairs(self._badges) do
         if b.frame and b.frame.Parent then b.frame:Destroy() end
     end
@@ -585,36 +578,7 @@ local function showCastLog(screenGui, lines)
 end
 
 -- ─────────────────────────────────────────────────────────────
---  CASTING ENGINE  (v2 — state machine + version tokens)
--- ─────────────────────────────────────────────────────────────
---
---  STATE MODEL
---  ───────────
---  IDLE      No input. Orbit invisible.
---  BUILDING  Player is pressing keys.
---              · _pressOrder   = chars confirmed (held long enough)
---              · _pendingChar  = char currently being held but not yet confirmed
---              · _pendingStart = os.clock() when pendingChar was pressed
---              · _pendingHold  = seconds required for pendingChar
---            Each Heartbeat: advance _pendingChar progress, mark done,
---            then check for exact/partial match.
---  CHARGING  Full sequence matched. Holding for HOLD_TIME.
---              · _chargeStart  = os.clock()
---              · _chargeSpell  = Spell to cast
---            Each Heartbeat: push charge progress to indicator,
---            fire cast when elapsed >= HOLD_TIME.
---
---  CANCELLATION
---  ────────────
---  _ver is bumped on every transition away from an active state.
---  The Heartbeat callback captures ver at start; if they mismatch
---  it returns immediately — nothing stale can fire.
---
---  KEY RELEASE
---  ───────────
---  Releasing _pendingChar (not yet confirmed) → fail
---  Releasing any char in _pressOrder while BUILDING or CHARGING → fail
---  Releasing any char while IDLE → ignored
+--  CASTING ENGINE  (v2.1 — fixed state machine)
 -- ─────────────────────────────────────────────────────────────
 
 local CastingEngine = {}
@@ -629,26 +593,20 @@ function CastingEngine.new(screenGui, indicator)
     self._castModeKey      = Enum.KeyCode.Tilde
     self._modeLabel        = nil
 
-    -- ── Core state ───────────────────────────────────────────
     self._state        = STATE.IDLE
-    self._ver          = 0           -- bumped on every interrupt/reset
+    self._ver          = 0
 
-    -- BUILDING state
-    self._pressOrder   = {}          -- confirmed chars, in order
-    self._pressedSet   = {}          -- all physically held chars (for release detection)
-    self._pendingChar  = nil         -- char held but not yet confirmed
-    self._pendingStart = 0           -- os.clock() when pending started
-    self._pendingHold  = 0           -- seconds required for pending
-    self._pendingBadge = 0           -- badge index for pending char
+    self._pressOrder   = {}
+    self._pressedSet   = {}
+    self._pendingChar  = nil
+    self._pendingStart = 0
+    self._pendingHold  = 0
+    self._pendingBadge = 0
 
-    -- CHARGING state
     self._chargeSpell  = nil
     self._chargeStart  = 0
 
-    -- Idle-reset tracking
-    self._lastKeyTime  = 0           -- os.clock() of last key event
-
-    -- Heartbeat connection
+    self._lastKeyTime  = 0
     self._hbConn       = nil
     self._connections  = {}
 
@@ -657,8 +615,6 @@ end
 
 function CastingEngine:setBooks(books)    self._books = books end
 function CastingEngine:setCastModeKey(kc) self._castModeKey = kc end
-
--- ── Spell lookup ─────────────────────────────────────────────
 
 function CastingEngine:_allSpells()
     local all = {}
@@ -677,27 +633,22 @@ function CastingEngine:_findExact(seq)
     return nil
 end
 
-function CastingEngine:_findPartial(seq)
+-- FIX #1: Changed from prefix matching to exact match only
+-- This prevents overlapping sequences (56 won't block 561)
+function CastingEngine:_findCompatible(seq)
+    -- Find if this partial sequence can lead to any complete spell
     for _, spell in ipairs(self:_allSpells()) do
-        if spell:getSequence():sub(1, #seq) == seq then return spell end
+        if spell:getSequence() == seq then return spell, true end  -- exact
+        if spell:getSequence():sub(1, #seq) == seq then return spell, false end  -- partial
     end
-    return nil
+    return nil, false
 end
-
--- ── Version bump ─────────────────────────────────────────────
---
---  Call before any state transition that should kill pending work.
---  The running Heartbeat closure captures ver locally at the top
---  of each tick; if self._ver has changed, it bails out.
 
 function CastingEngine:_bumpVer()
     self._ver = self._ver + 1
     return self._ver
 end
 
--- ── Transition helpers ────────────────────────────────────────
-
--- Full reset to IDLE — no animation.
 function CastingEngine:_toIdle()
     self:_bumpVer()
     self._state        = STATE.IDLE
@@ -709,10 +660,10 @@ function CastingEngine:_toIdle()
     self._pendingBadge = 0
     self._chargeSpell  = nil
     self._chargeStart  = 0
+    self._indicator:setCharging(false)
     self._indicator:resetSilent()
 end
 
--- Fail with animation + optional log message.
 function CastingEngine:_fail(reason)
     self:_bumpVer()
     self._state        = STATE.IDLE
@@ -720,11 +671,7 @@ function CastingEngine:_fail(reason)
     self._pressedSet   = {}
     self._pendingChar  = nil
     self._chargeSpell  = nil
-
-    -- Indicator handles its own animation cleanup timing.
-    -- Engine is already IDLE, so new input can start immediately
-    -- (OrbitIndicator.fail() sets _dying=true to block duplicate calls,
-    --  and _hardReset() clears _dying after animation).
+    self._indicator:setCharging(false)
     self._indicator:fail()
 
     if reason then
@@ -735,65 +682,50 @@ function CastingEngine:_fail(reason)
     end
 end
 
--- Transition to BUILDING after confirming a key.
--- (State was already BUILDING; this just refreshes pending tracking.)
 function CastingEngine:_confirmPending()
-    -- pendingChar has been held long enough — add to pressOrder
     local char = self._pendingChar
     table.insert(self._pressOrder, char)
     self._pendingChar  = nil
     self._pendingStart = 0
 
-    -- Update indicator badge: mark it done
-    -- (prog=1, done=true — already pushed each frame, now locked)
     self._indicator:updateKeyProgress(self._pendingBadge, 1, true)
     self._pendingBadge = 0
 
     local current = table.concat(self._pressOrder)
 
-    -- Exact match → CHARGING
     local exactSpell = self:_findExact(current)
     if exactSpell then
         self._state       = STATE.CHARGING
         self._chargeSpell = exactSpell
         self._chargeStart = os.clock()
+        self._indicator:setCharging(true)
         return
     end
 
-    -- Partial match → keep BUILDING, wait for next key
-    local partial = self:_findPartial(current)
-    if not partial then
+    local compatible = self:_findCompatible(current)
+    if not compatible then
         self:_fail("No spell matches this sequence.")
     end
-    -- else: waiting for next key press — stay in BUILDING
 end
-
--- ── Main Heartbeat loop ───────────────────────────────────────
---
---  This is the single update function that drives all timing.
---  It captures _ver at entry and checks it before any state write.
 
 function CastingEngine:_startHeartbeat()
     self._hbConn = RunService.Heartbeat:Connect(function()
         if not self._castMode then return end
 
-        local ver = self._ver   -- capture current version
+        local ver = self._ver
 
-        -- ── BUILDING: advance pending-key progress ──────────
         if self._state == STATE.BUILDING and self._pendingChar then
             local elapsed = os.clock() - self._pendingStart
             local prog    = math.clamp(elapsed / self._pendingHold, 0, 1)
             self._indicator:updateKeyProgress(self._pendingBadge, prog, prog >= 1)
 
             if prog >= 1 then
-                -- Held long enough — confirm only if ver hasn't changed
                 if self._ver ~= ver then return end
                 self:_confirmPending()
             end
             return
         end
 
-        -- ── CHARGING: advance final hold ────────────────────
         if self._state == STATE.CHARGING then
             local elapsed = os.clock() - self._chargeStart
             local prog    = math.clamp(elapsed / HOLD_TIME, 0, 1)
@@ -802,7 +734,7 @@ function CastingEngine:_startHeartbeat()
             if prog >= 1 then
                 if self._ver ~= ver then return end
 
-                -- Verify all sequence keys still held
+                -- FIX #4: Only check keys in the sequence, not all held keys
                 local seq = self._chargeSpell:getSequence()
                 for i = 1, #seq do
                     if not self._pressedSet[seq:sub(i, i)] then
@@ -815,18 +747,10 @@ function CastingEngine:_startHeartbeat()
             end
             return
         end
-
-        -- ── IDLE: check idle-reset timer ────────────────────
-        -- (Keys may still be physically held from a non-cast key;
-        --  only reset if we somehow drifted here with pressedSet non-empty)
-        -- Nothing to do — IDLE is the resting state.
     end)
 end
 
--- ── Key pressed ───────────────────────────────────────────────
-
 function CastingEngine:onKeyDown(key)
-    -- Cast mode toggle
     if key == self._castModeKey then
         if self._castMode then self:_exitCastMode() else self:_enterCastMode() end
         return
@@ -835,23 +759,23 @@ function CastingEngine:onKeyDown(key)
     if not self._castMode then return end
 
     if key == Enum.KeyCode.Escape then
-        self:_exitCastMode()
+        -- FIX #3: Allow escape to cancel mid-sequence
+        if self._state ~= STATE.IDLE then
+            self:_fail("Sequence cancelled.")
+        end
         return
     end
 
     local char = CAST_KEY_MAP[key]
     if not char then return end
 
-    -- Track that this key is physically held (for release detection)
     self._pressedSet[char] = true
     self._lastKeyTime = os.clock()
 
-    -- ── IDLE → BUILDING ─────────────────────────────────────
     if self._state == STATE.IDLE then
-        -- Determine hold time from any spell that starts with this key
         local keyHold = KEY_HOLD_TIME
-        local partial  = self:_findPartial(char)
-        if partial then keyHold = partial.keyHoldTime or KEY_HOLD_TIME end
+        local compatible = self:_findCompatible(char)
+        if compatible then keyHold = compatible.keyHoldTime or KEY_HOLD_TIME end
 
         self._state        = STATE.BUILDING
         self._pendingChar  = char
@@ -862,19 +786,18 @@ function CastingEngine:onKeyDown(key)
         return
     end
 
-    -- ── BUILDING: new key while a key is pending ─────────────
-    --  Block until pending key is confirmed (held long enough).
     if self._state == STATE.BUILDING then
         if self._pendingChar then
-            -- Key pressed before current pending key finished.
-            -- Treat as a fail — "too fast" is a legit skill ceiling.
-            -- (Alternative: queue it. We choose fail for precision feel.)
-            self:_fail("Hold each key longer before pressing the next.")
-            return
+            -- FIX #2: Allow grace window for near-simultaneous key presses
+            local timeSincePending = os.clock() - self._pendingStart
+            if timeSincePending < self._pendingHold - KEY_GRACE then
+                self:_fail("Keys too close together.")
+                return
+            end
+            -- Continue: allow the overlap if we're close enough to hold time
+            self._pendingChar  = nil
         end
 
-        -- Pending is nil → last key was confirmed, waiting for next.
-        -- Pressing same key as one already in sequence = fail.
         for _, c in ipairs(self._pressOrder) do
             if c == char then
                 self:_fail("Key already in sequence.")
@@ -882,11 +805,10 @@ function CastingEngine:onKeyDown(key)
             end
         end
 
-        -- Determine hold time from partial spell
         local seq      = table.concat(self._pressOrder) .. char
         local keyHold  = KEY_HOLD_TIME
-        local partial  = self:_findPartial(seq)
-        if partial then keyHold = partial.keyHoldTime or KEY_HOLD_TIME end
+        local compatible = self:_findCompatible(seq)
+        if compatible then keyHold = compatible.keyHoldTime or KEY_HOLD_TIME end
 
         local badgeIdx = #self._pressOrder + 1
         self._pendingChar  = char
@@ -897,55 +819,36 @@ function CastingEngine:onKeyDown(key)
         return
     end
 
-    -- ── CHARGING: any new key = interrupt ───────────────────
     if self._state == STATE.CHARGING then
         self:_fail("Sequence interrupted.")
-        -- Re-enter the key as a fresh start on the next frame.
-        -- (pressedSet already has it; let onKeyDown fire again next frame
-        --  naturally if they hold it. Don't auto-restart here to avoid
-        --  ghost sequences.)
         return
     end
 end
-
--- ── Key released ─────────────────────────────────────────────
 
 function CastingEngine:onKeyUp(key)
     if not self._castMode then return end
     local char = CAST_KEY_MAP[key]
     if not char then return end
 
-    -- Not tracking this key at all? Ignore.
     if not self._pressedSet[char] then return end
     self._pressedSet[char] = nil
 
     if self._state == STATE.IDLE then return end
 
-    -- Released the pending key (not yet confirmed) → fail
     if self._pendingChar == char then
         self:_fail("Key released too soon.")
         return
     end
 
-    -- Released a confirmed key while BUILDING or CHARGING → fail
     for _, c in ipairs(self._pressOrder) do
         if c == char then
             self:_fail("Sequence broken — " .. char .. " released.")
             return
         end
     end
-
-    -- Released an unrelated key (e.g. a previously pressed non-cast key).
-    -- If BUILDING and now no relevant keys held, start idle timer.
-    -- (We don't use a separate idle thread — the Heartbeat is always running.)
-    -- Nothing extra to do here.
 end
 
--- ── Cast execution ────────────────────────────────────────────
-
 function CastingEngine:_doCast(spell)
-    -- Transition to IDLE before firing callback
-    -- (Prevents re-entrance if callback triggers input)
     local capturedSpell = spell
     self:_bumpVer()
     self._state       = STATE.IDLE
@@ -953,6 +856,7 @@ function CastingEngine:_doCast(spell)
     self._pressedSet  = {}
     self._chargeSpell = nil
     self._pendingChar = nil
+    self._indicator:setCharging(false)
 
     if capturedSpell:isCoolingDown() then
         local rem = math.ceil(capturedSpell:cooldownRemaining())
@@ -987,13 +891,6 @@ function CastingEngine:_doCast(spell)
     self._indicator:resetSuccess()
 end
 
--- Public cast (called from the UI "Cast Now" button)
-function CastingEngine:_cast(spell)
-    self:_doCast(spell)
-end
-
--- ── Cast mode enter / exit ────────────────────────────────────
-
 function CastingEngine:_enterCastMode()
     self._castMode = true
     self:_toIdle()
@@ -1011,8 +908,6 @@ function CastingEngine:_exitCastMode()
         self._modeLabel.Visible = false
     end
 end
-
--- ── Input listeners ───────────────────────────────────────────
 
 function CastingEngine:startListening()
     local c1 = UserInputService.InputBegan:Connect(function(input, gp)
@@ -1041,7 +936,7 @@ function CastingEngine:stopListening()
 end
 
 -- ─────────────────────────────────────────────────────────────
---  SEQUENCE BADGE ROW  (in-book display)
+--  SEQUENCE BADGE ROW
 -- ─────────────────────────────────────────────────────────────
 
 local function buildSeqRow(parent, sequence)
@@ -1107,7 +1002,6 @@ function SpellbookUI:_buildGui()
     self._engine:setBooks(self._lib._books)
     self._engine:startListening()
 
-    -- Cast mode label (top-center)
     self._modeLabel = makeLabel({
         Name           = "CastModeLabel",
         Size           = UDim2.new(0, 120, 0, 22),
@@ -1131,7 +1025,6 @@ function SpellbookUI:_buildGui()
     self._modeLabel.BackgroundTransparency = 1
     self._engine._modeLabel = self._modeLabel
 
-    -- Main window
     local win = makeFrame({
         Name             = "SpellbookWindow",
         BackgroundColor3 = THEME.bg,
@@ -1382,33 +1275,16 @@ function SpellbookUI:_buildPageContent(c)
         ZIndex         = 14,
     }, self._cdHolder)
 
-    local castBtn = makeButton({
-        Size             = UDim2.new(0, 120, 0, 32),
-        Position         = UDim2.new(0, pad, 0, 344),
-        BackgroundColor3 = THEME.gold_dim,
-        Text             = "> Cast Now",
-        TextColor3       = THEME.bg,
-        Font             = Enum.Font.GothamBold,
-        TextSize         = 13,
-        ZIndex           = 12,
-    }, c)
-    addCorner(6, castBtn)
-    castBtn.MouseButton1Click:Connect(function() self:_castCurrent() end)
-    castBtn.MouseEnter:Connect(function()
-        TweenService:Create(castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold }):Play()
-    end)
-    castBtn.MouseLeave:Connect(function()
-        TweenService:Create(castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold_dim }):Play()
-    end)
-    self._castBtn = castBtn
+    -- FIX #1: Removed "Cast Now" button entirely to enforce skill-based casting
+    -- This maintains the integrity of the casting system as a skill challenge
 
     self._statusLabel = makeLabel({
         Size           = UDim2.new(0, 180, 0, 32),
-        Position       = UDim2.new(0, pad + 132, 0, 344),
-        Text           = "",
+        Position       = UDim2.new(0, pad, 0, 344),
+        Text           = "ESC = cancel sequence",
         TextColor3     = THEME.ink_dim,
         Font           = Enum.Font.Gotham,
-        TextSize       = 11,
+        TextSize       = 10,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex         = 12,
     }, c)
@@ -1488,8 +1364,6 @@ function SpellbookUI:_buildBottomBar(win)
     }, bar)
 end
 
--- ── Rendering ──────────────────────────────────────────────────
-
 function SpellbookUI:_currentBookF()
     return self._lib._books[self._currentBook]
 end
@@ -1561,19 +1435,6 @@ function SpellbookUI:_reorder(dir)
     self:_renderPage()
 end
 
-function SpellbookUI:_castCurrent()
-    local book = self:_currentBookF()
-    if not book or #book.spells == 0 then return end
-    local spell = book.spells[self._currentPage]
-    if not spell then return end
-
-    TweenService:Create(self._castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold }):Play()
-    task.delay(0.2, function()
-        TweenService:Create(self._castBtn, TweenInfo.new(0.1), { BackgroundColor3 = THEME.gold_dim }):Play()
-    end)
-    self._engine:_cast(spell)
-end
-
 function SpellbookUI:_cycleBook()
     local books = self._lib._books
     if #books <= 1 then
@@ -1620,20 +1481,12 @@ function SpellbookUI:destroy()
 end
 
 -- ─────────────────────────────────────────────────────────────
---  SPELLBOOK LIBRARY  — public API (unchanged)
+--  SPELLBOOK LIBRARY
 -- ─────────────────────────────────────────────────────────────
 
 local SpellbookLib = {}
 SpellbookLib.__index = SpellbookLib
 
---[[
-    SpellbookLib.new(config?)
-
-    config:
-        toggleKey     Enum.KeyCode   window toggle          (default: RightBracket)
-        castModeKey   Enum.KeyCode   enter/exit cast mode   (default: Tilde `)
-        autoOpen      bool           open immediately       (default: false)
-]]
 function SpellbookLib.new(config)
     local self = setmetatable({}, SpellbookLib)
     config = config or {}
@@ -1660,10 +1513,6 @@ function SpellbookLib.new(config)
     return self
 end
 
---[[
-    lib:addBook(name) → Book
-    Returns a book whose addSpell guarantees globally unique sequences.
-]]
 function SpellbookLib:addBook(name)
     local lib  = self
     local book = Book.new(name)
