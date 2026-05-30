@@ -834,6 +834,11 @@ function CastingEngine:_onKeyCharged(char)
     if exactSpell then
         if isExtendable(self, current) then
             -- WAIT instead of casting
+            self._holdThread = task.delay(0.4, function()
+                if self._currentSpell and table.concat(self._pressOrder) == current then
+                    self:_startFinalHold(self._currentSpell, current)
+                end
+            end)
             self._currentSpell = exactSpell
             return
         else
